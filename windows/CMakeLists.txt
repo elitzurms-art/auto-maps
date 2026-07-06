@@ -72,6 +72,10 @@ endif()
 set(INSTALL_BUNDLE_DATA_DIR "${CMAKE_INSTALL_PREFIX}/data")
 set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
 
+# Native ECW decoder (C DLL for FFI) — bundled auto_maps_ecw.dll + prebuilt
+# OSGeo4W GDAL runtime next to auto_maps.exe. Must be after CMAKE_INSTALL_PREFIX.
+add_subdirectory("ecw_native")
+
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
 

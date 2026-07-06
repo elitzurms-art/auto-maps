@@ -13,7 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+// pthread is used for one-time GDAL registration on POSIX (Android/iOS). MSVC
+// has no <pthread.h>; the Windows build uses InitOnceExecuteOnce instead (below).
+#if !defined(_WIN32)
 #include <pthread.h>
+#endif
 
 #define LOG_TAG "navigate_ecw"
 // Portable logging: Android uses logcat; everywhere else (iOS, macOS) -> stderr.
@@ -60,15 +64,55 @@ extern int GDALDatasetRasterIO(GDALDatasetH hDS, int eRWFlag, int nXOff,
                                int nBandCount, int *panBandMap, int nPixelSpace,
                                int nLineSpace, int nBandSpace);
 
+// ───────────────────────── Windows self-configuration ───────────────────────
+// On Windows the app ships the OSGeo4W GDAL runtime *next to the .exe* (no
+// OSGeo4W install on the end machine). GDAL therefore can't find its plugin dir
+// / data files via the registry, so we point it at the bundled folders, which
+// sit beside this very DLL:  <dir>/gdalplugins , <dir>/gdal_data , <dir>/proj_data.
+// We locate our own module at runtime (GetModuleFileName) so it works regardless
+// of the working directory. Config options must be set *before* GDALAllRegister.
+#if defined(_WIN32)
+#include <windows.h>
+static void ecw_set_win_data_dirs(void) {
+  HMODULE hm = NULL;
+  if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          (LPCSTR)&ecw_set_win_data_dirs, &hm)) {
+    return;
+  }
+  char dir[MAX_PATH];
+  DWORD n = GetModuleFileNameA(hm, dir, (DWORD)sizeof(dir));
+  if (n == 0 || n >= sizeof(dir)) return;
+  char *slash = strrchr(dir, '\\');
+  if (slash) *slash = '\0';
+
+  char buf[MAX_PATH + 32];
+  snprintf(buf, sizeof(buf), "%s\\gdalplugins", dir);
+  CPLSetConfigOption("GDAL_DRIVER_PATH", buf);
+  snprintf(buf, sizeof(buf), "%s\\gdal_data", dir);
+  CPLSetConfigOption("GDAL_DATA", buf);
+  snprintf(buf, sizeof(buf), "%s\\proj_data", dir);
+  CPLSetConfigOption("PROJ_DATA", buf);  // PROJ 6+ search path (GDAL forwards it)
+  CPLSetConfigOption("PROJ_LIB", buf);   // legacy PROJ name, harmless duplicate
+  LOGI("Windows GDAL data dirs anchored at %s", dir);
+}
+#endif
+
 // ───────────────────────────── wrapper API ──────────────────────────────────
 // Exported to Dart via dart:ffi (see lib/services/ecw/ecw_gdal_decoder.dart).
 
 // GDALAllRegister() is not thread-safe; with a pool of worker isolates (which
-// share one native process) several threads may reach it at once. pthread_once
-// guarantees the driver registration + global config run exactly once.
+// share one native process) several threads may reach it at once. A one-time
+// init guarantees the driver registration + global config run exactly once
+// (pthread_once on POSIX, InitOnceExecuteOnce on Windows).
+#if !defined(_WIN32)
 static pthread_once_t g_register_once = PTHREAD_ONCE_INIT;
+#endif
 
 static void do_register(void) {
+#if defined(_WIN32)
+  ecw_set_win_data_dirs();
+#endif
   // Decode-only ECW: keep GDAL/ECW caches modest. Config is process-global
   // (shared by all worker isolates), so these are NOT multiplied per worker.
   CPLSetConfigOption("GDAL_CACHEMAX", "256");
@@ -80,9 +124,23 @@ static void do_register(void) {
   LOGI("GDAL registered: %s", GDALVersionInfo("RELEASE_NAME"));
 }
 
+#if defined(_WIN32)
+static INIT_ONCE g_register_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK do_register_cb(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+  (void)once;
+  (void)param;
+  (void)ctx;
+  do_register();
+  return TRUE;
+}
+static void ensure_registered(void) {
+  InitOnceExecuteOnce(&g_register_once, do_register_cb, NULL, NULL);
+}
+#else
 static void ensure_registered(void) {
   pthread_once(&g_register_once, do_register);
 }
+#endif
 
 // Returns the GDAL release string (e.g. "3.12.1"). Never NULL.
 const char *ecw_gdal_version(void) {

@@ -1,0 +1,21 @@
+; Minimal import definition for gdal313.dll (OSGeo4W GDAL 3.13, ECW SDK 5.5).
+; Only the C-API symbols used by ecw_wrapper.c are exported here — generated
+; so we can link auto_maps_ecw.dll against the prebuilt gdal313.dll without the
+; OSGeo4W gdal-dev package. The actual DLL (gdal313.dll) is bundled at runtime.
+LIBRARY gdal313.dll
+EXPORTS
+GDALAllRegister
+GDALOpen
+GDALClose
+GDALVersionInfo
+GDALGetRasterXSize
+GDALGetRasterYSize
+GDALGetRasterCount
+GDALGetProjectionRef
+GDALGetGeoTransform
+CPLSetConfigOption
+CPLGetLastErrorMsg
+GDALWarpAppOptionsNew
+GDALWarpAppOptionsFree
+GDALWarp
+GDALDatasetRasterIO

@@ -48,8 +48,10 @@ class NativeEcwService {
   EcwMetadata? _metadata;
   String? _openPath;
 
-  /// האם הפלטפורמה הנוכחית תומכת בפענוח ECW נייטיבי (Android/iOS בלבד).
-  static bool get isSupportedPlatform => Platform.isAndroid || Platform.isIOS;
+  /// האם הפלטפורמה הנוכחית תומכת בפענוח ECW נייטיבי (Android/iOS + Windows).
+  /// ב-Windows ה-DLL `auto_maps_ecw.dll` מקושר ל-GDAL של OSGeo4W המצורף ליד ה-exe.
+  static bool get isSupportedPlatform =>
+      Platform.isAndroid || Platform.isIOS || Platform.isWindows;
 
   /// האם קובץ נפתח בהצלחה והשירות מוכן לרנדר אריחים.
   bool get isReady => _gdal.isReady;

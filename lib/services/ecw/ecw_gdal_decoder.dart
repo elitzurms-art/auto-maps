@@ -44,10 +44,14 @@ typedef _FreeDart = void Function(Pointer<Uint8> p);
 /// - Android: `libauto_maps_ecw.so` (GDAL+ECW prebuilt מ-jniLibs).
 /// - iOS: ה-pod מקשר את ecw_wrapper.c + gdal_ecw.xcframework **סטטית** לתוך בינארי
 ///   האפליקציה, אז הסמלים נמצאים בתהליך עצמו → `DynamicLibrary.process()`.
-/// - Windows/מחשב: משתמשים בנתיב Python/GDAL (EcwTileServer), לא בנתיב הזה.
+/// - Windows: `auto_maps_ecw.dll` (אותו ecw_wrapper.c) מקושר ל-gdal313.dll של
+///   OSGeo4W שמצורף ליד ה-exe (ראה windows/ecw_native/CMakeLists.txt). ה-DLL
+///   מאותר בתיקיית ה-exe (חיפוש ה-DLL הרגיל של Windows), ומעגן בעצמו את נתיבי
+///   GDAL_DATA/PROJ_DATA/gdalplugins המצורפים.
 DynamicLibrary _openEcwLibrary() {
   if (Platform.isAndroid) return DynamicLibrary.open('libauto_maps_ecw.so');
   if (Platform.isIOS) return DynamicLibrary.process();
+  if (Platform.isWindows) return DynamicLibrary.open('auto_maps_ecw.dll');
   throw UnsupportedError(
       'ECW native decoder not built for ${Platform.operatingSystem}');
 }
