@@ -58,6 +58,9 @@ dependencies:
   # Networking (OSM tiles / future sources)
   http: ^1.2.0
 
+  # Native interop (ECW GDAL decoder FFI — mobile only)
+  ffi: ^2.1.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
