@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:ui' as ui;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -35,8 +36,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   final List<_ControlPoint> _points = [];
   int? _editingIndex;
 
-  // מקור מפת-הרקע (MVP: OSM בלבד)
+  // מקור מפת-הרקע — OSM + מקורות מקומיים שהתגלו (MBTiles / ECW)
   final ReferenceMapController _refMap = ReferenceMapController();
+  String? _lastShownError;
 
   // תמונה
   int _imageWidth = 0;
@@ -68,6 +70,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     super.initState();
     _loadImageSize();
     _refMap.addListener(_onRefMapChanged);
+    // גילוי אוטומטי של קבצי-מפה בתיקיית-הייחוס המשתמעת (reference_maps).
+    _refMap.loadDefaultFolder();
   }
 
   @override
@@ -77,7 +81,59 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     super.dispose();
   }
 
-  void _onRefMapChanged() => setState(() {});
+  void _onRefMapChanged() {
+    // הצגת שגיאת-טעינה (למשל sidecar של ECW נכשל) פעם אחת.
+    final err = _refMap.lastError;
+    if (err != null && err != _lastShownError && mounted) {
+      _lastShownError = err;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(SnackBar(content: Text(err)));
+      });
+    }
+    setState(() {});
+  }
+
+  /// בחירת תיקיית-מפות — סורק ומוסיף כל קובץ מפה נתמך כמקור בבורר.
+  Future<void> _pickReferenceFolder() async {
+    final dir = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: 'בחר תיקיית מפות ייחוס',
+    );
+    if (dir == null) return;
+    await _refMap.loadFolder(dir);
+    if (!mounted) return;
+    final count = _refMap.availableSources().length - 1; // מלבד OSM
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+          content: Text(count > 0
+              ? 'נטענו $count מקורות מפה מהתיקייה'
+              : 'לא נמצאו קבצי מפה נתמכים בתיקייה')));
+  }
+
+  /// בחירת קובץ ECW יחיד והוספתו כמקור אורתופוטו.
+  Future<void> _pickEcwFile() async {
+    final res = await FilePicker.platform.pickFiles(
+      dialogTitle: 'בחר קובץ ECW (אורתופוטו)',
+      type: FileType.custom,
+      allowedExtensions: ['ecw'],
+    );
+    final path = res?.files.single.path;
+    if (path == null) return;
+    final src = _refMap.addEcwFile(path);
+    if (!mounted) return;
+    if (src == null) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(
+            content: Text('הקובץ כבר קיים או ש-OSGeo4W אינו מותקן')));
+      return;
+    }
+    // הפעלה מיידית של המקור שנבחר.
+    await _refMap.setActive(src);
+  }
 
   Future<void> _loadImageSize() async {
     final bytes = await File(widget.imagePath).readAsBytes();
@@ -567,24 +623,70 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             ),
           ],
         ),
-        // בורר מקור מפה (MVP: OSM בלבד; מרובה-אפשרויות כשיתווסף ECW)
-        if (sources.length > 1)
-          Positioned(
-            top: 8,
-            right: 8,
-            child: Material(
-              elevation: 2,
-              borderRadius: BorderRadius.circular(8),
-              child: PopupMenuButton<ReferenceMapSource>(
-                icon: const Icon(Icons.layers),
-                onSelected: _refMap.setActive,
-                itemBuilder: (ctx) => sources
-                    .map((s) => PopupMenuItem(
-                          value: s,
-                          child: Text(s.displayName),
-                        ))
-                    .toList(),
+        // סרגל מקורות-מפה: בורר (כשיש יותר ממקור אחד) + הוספת תיקייה/ECW
+        Positioned(
+          top: 8,
+          right: 8,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              if (sources.length > 1)
+                Material(
+                  elevation: 2,
+                  borderRadius: BorderRadius.circular(8),
+                  child: PopupMenuButton<ReferenceMapSource>(
+                    icon: const Icon(Icons.layers),
+                    tooltip: 'בחר מקור מפה',
+                    onSelected: _refMap.setActive,
+                    itemBuilder: (ctx) => sources
+                        .map((s) => PopupMenuItem(
+                              value: s,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (s.id == _refMap.active.id)
+                                    const Icon(Icons.check,
+                                        size: 16, color: Colors.green)
+                                  else
+                                    const SizedBox(width: 16),
+                                  const SizedBox(width: 6),
+                                  Text(s.displayName),
+                                ],
+                              ),
+                            ))
+                        .toList(),
+                  ),
+                ),
+              const SizedBox(height: 6),
+              Material(
+                elevation: 2,
+                borderRadius: BorderRadius.circular(8),
+                child: IconButton(
+                  icon: const Icon(Icons.folder_open),
+                  tooltip: 'בחר תיקיית מפות',
+                  onPressed: _pickReferenceFolder,
+                ),
               ),
+              if (ReferenceMapController.ecwToolingAvailable) ...[
+                const SizedBox(height: 6),
+                Material(
+                  elevation: 2,
+                  borderRadius: BorderRadius.circular(8),
+                  child: IconButton(
+                    icon: const Icon(Icons.satellite_alt),
+                    tooltip: 'הוסף אורתופוטו ECW',
+                    onPressed: _pickEcwFile,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        // מחוון טעינה בזמן החלפת מקור (הרצת sidecar / פתיחת DB)
+        if (_refMap.isSwitching)
+          const Positioned.fill(
+            child: IgnorePointer(
+              child: Center(child: CircularProgressIndicator()),
             ),
           ),
         // צלב במרכז
