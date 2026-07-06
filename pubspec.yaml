@@ -58,8 +58,14 @@ dependencies:
   # Networking (OSM tiles / future sources)
   http: ^1.2.0
 
-  # Native interop (ECW GDAL decoder FFI — mobile only)
+  # Native interop (ECW GDAL decoder FFI — Windows + Android/iOS)
   ffi: ^2.1.0
+
+  # Offline raster maps — MBTiles reference-map source (folder scan)
+  flutter_map_mbtiles: ^1.0.4
+  mbtiles: ^0.4.2
+  # Bundles the native sqlite3 library the `mbtiles` package needs on Windows.
+  sqlite3_flutter_libs: ^0.5.20
 
 dev_dependencies:
   flutter_test:
