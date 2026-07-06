@@ -6,7 +6,11 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
+import '../services/gdal_warp_service.dart';
+import '../services/gemini_anchor_service.dart';
 import '../services/reference_map_controller.dart';
 import '../services/world_file_parser_service.dart';
 
@@ -20,8 +24,25 @@ class _ControlPoint {
   bool get isComplete => world != null;
 }
 
-/// מסך Georeferencing — נעיצת נקודות פיקסל↔עולם וחישוב טרנספורמציה affine.
-/// מחזיר [WorldFileResult] דרך Navigator.pop כשמאשרים.
+/// תוצאת מסך הנעיצה — ה-bounds/פינות + אופן הטרנספורמציה.
+///
+/// כש-[transform] הוא `"tps"`, [warpedImagePath] מצביע על ה-PNG המיושר
+/// שנוצר (זו התמונה לייצוא במקום המקור); ב-affine הוא null.
+class GeoreferenceOutcome {
+  final WorldFileResult result;
+  final String transform;
+  final String? warpedImagePath;
+
+  const GeoreferenceOutcome({
+    required this.result,
+    required this.transform,
+    this.warpedImagePath,
+  });
+}
+
+/// מסך Georeferencing — נעיצת נקודות פיקסל↔עולם וחישוב טרנספורמציה affine,
+/// עם יישור TPS אופציונלי למפות לא-ישרות והצעת עוגנים אוטומטית (Gemini).
+/// מחזיר [GeoreferenceOutcome] דרך Navigator.pop כשמאשרים.
 class GeoreferenceScreen extends StatefulWidget {
   final String imagePath;
 
@@ -65,6 +86,14 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   // תוצאה
   WorldFileResult? _result;
 
+  // יישור TPS למפות לא-ישרות (מצולמות/משורטטות) — זמין רק כשה-GDAL המצורף קיים
+  bool _tpsMode = false;
+
+  // מצב אוטומטי — הצעות עוגנים מ-Gemini הממתינות לאישור פר-נקודה
+  List<GeminiAnchorSuggestion> _suggestions = [];
+  bool _aiBusy = false;
+  bool _warping = false;
+
   @override
   void initState() {
     super.initState();
@@ -107,10 +136,15 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     final count = _refMap.availableSources().length - 1; // מלבד OSM
     ScaffoldMessenger.of(context)
       ..clearSnackBars()
-      ..showSnackBar(SnackBar(
-          content: Text(count > 0
-              ? 'נטענו $count מקורות מפה מהתיקייה'
-              : 'לא נמצאו קבצי מפה נתמכים בתיקייה')));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            count > 0
+                ? 'נטענו $count מקורות מפה מהתיקייה'
+                : 'לא נמצאו קבצי מפה נתמכים בתיקייה',
+          ),
+        ),
+      );
   }
 
   Future<void> _loadImageSize() async {
@@ -154,9 +188,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
 
     try {
       final result = WorldFileParserService.calculateFromControlPoints(
-        points: complete
-            .map((p) => (pixel: p.pixel, world: p.world!))
-            .toList(),
+        points: complete.map((p) => (pixel: p.pixel, world: p.world!)).toList(),
         imageWidth: _imageWidth,
         imageHeight: _imageHeight,
       );
@@ -164,15 +196,205 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     } catch (e) {
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
-        ..showSnackBar(
-          SnackBar(content: Text('שגיאת חישוב: $e')),
-        );
+        ..showSnackBar(SnackBar(content: Text('שגיאת חישוב: $e')));
     }
   }
 
-  void _confirm() {
-    if (_result == null) return;
-    Navigator.pop(context, _result);
+  Future<void> _confirm() async {
+    final result = _result;
+    if (result == null || _warping) return;
+
+    // affine רגיל — התמונה המקורית + הפינות המחושבות.
+    if (!_tpsMode) {
+      Navigator.pop(
+        context,
+        GeoreferenceOutcome(result: result, transform: 'affine'),
+      );
+      return;
+    }
+
+    // TPS — מיישרים את הרסטר עצמו (gdalwarp -tps בתהליך) ומחזירים את
+    // ה-PNG המיושר + הפינות שלו. הצרכן ב-LiveMaps לא משתנה.
+    setState(() => _warping = true);
+    try {
+      final complete = _points.where((pt) => pt.isComplete).toList();
+      final tmp = await getTemporaryDirectory();
+      final dst = p.join(
+        tmp.path,
+        'tps_${DateTime.now().millisecondsSinceEpoch}.png',
+      );
+      final warped = await GdalWarpService.warpTps(
+        srcImagePath: widget.imagePath,
+        points: complete
+            .map((pt) => (pixel: pt.pixel, world: pt.world!))
+            .toList(),
+        dstPngPath: dst,
+      );
+      if (!mounted) return;
+      Navigator.pop(
+        context,
+        GeoreferenceOutcome(
+          result: warped.result,
+          transform: 'tps',
+          warpedImagePath: warped.pngPath,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _warping = false);
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(content: Text('יישור TPS נכשל: $e')));
+    }
+  }
+
+  // ═══ מצב אוטומטי — הצעת עוגנים (Gemini) ═══
+
+  Future<void> _runAiSuggest() async {
+    if (_aiBusy) return;
+    var key = await GeminiAnchorService.getApiKey();
+    key ??= await _promptApiKey();
+    if (key == null || !mounted) return;
+
+    setState(() => _aiBusy = true);
+    try {
+      final suggestions = await GeminiAnchorService().suggestAnchors(
+        imagePath: widget.imagePath,
+        imageWidth: _imageWidth,
+        imageHeight: _imageHeight,
+        apiKey: key,
+      );
+      if (!mounted) return;
+      setState(() {
+        _suggestions = suggestions;
+        _isOnMap = false; // ההצעות מוצגות על התמונה
+      });
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              suggestions.isEmpty
+                  ? 'לא זוהו עוגנים בביטחון מספיק — נעץ ידנית'
+                  : 'נתקבלו ${suggestions.length} הצעות — לחץ על סמן סגול לאישור',
+            ),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(content: Text('הצעת עוגנים נכשלה: $e')));
+    } finally {
+      if (mounted) setState(() => _aiBusy = false);
+    }
+  }
+
+  Future<String?> _promptApiKey() async {
+    final ctrl = TextEditingController();
+    final key = await showDialog<String>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: const Text('מפתח Gemini API'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'להצעת עוגנים אוטומטית נדרש מפתח API של Google '
+                'Gemini (נשמר מקומית במכשיר).\nאפשר להנפיק חינם ב-'
+                'aistudio.google.com/apikey',
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: ctrl,
+                autofocus: true,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'API Key',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('ביטול'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text('שמור'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (key == null || key.isEmpty) return null;
+    await GeminiAnchorService.setApiKey(key);
+    return key;
+  }
+
+  /// אישור/דחייה של הצעת-עוגן בודדת — הלב של "אישור פר-נקודה".
+  void _showSuggestionDialog(int index) {
+    final s = _suggestions[index];
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: Row(
+            children: [
+              const Icon(Icons.auto_awesome, color: Colors.purple, size: 20),
+              const SizedBox(width: 8),
+              Expanded(child: Text(s.name)),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('זוהה לפי: ${s.basis}'),
+              Text('ביטחון: ${(s.confidence * 100).round()}%'),
+              const SizedBox(height: 4),
+              Text(
+                '${s.world.latitude.toStringAsFixed(6)}, '
+                '${s.world.longitude.toStringAsFixed(6)}',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton.icon(
+              onPressed: () {
+                Navigator.pop(ctx);
+                setState(() => _suggestions.removeAt(index));
+              },
+              icon: const Icon(Icons.close, color: Colors.red),
+              label: const Text('דחה', style: TextStyle(color: Colors.red)),
+            ),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.pop(ctx);
+                setState(() {
+                  _points.add(_ControlPoint(pixel: s.pixel)..world = s.world);
+                  _suggestions.removeAt(index);
+                  _result = null;
+                });
+              },
+              icon: const Icon(Icons.check),
+              label: const Text('אשר נקודה'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _editPoint(int index) {
@@ -206,8 +428,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             ),
             ListTile(
               leading: const Icon(Icons.delete, color: Colors.red),
-              title: const Text('מחק נקודה',
-                  style: TextStyle(color: Colors.red)),
+              title: const Text(
+                'מחק נקודה',
+                style: TextStyle(color: Colors.red),
+              ),
               onTap: () {
                 Navigator.pop(ctx);
                 _deletePoint(index);
@@ -240,12 +464,29 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       child: Scaffold(
         appBar: AppBar(
           title: Text('ג\'יאורפרנס ($_completeCount / $_minPoints נקודות)'),
+          actions: [
+            // מצב אוטומטי — הצעת עוגנים מ-Gemini עם אישור פר-נקודה
+            _aiBusy
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 14),
+                    child: Center(
+                      child: SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                  )
+                : IconButton(
+                    icon: const Icon(Icons.auto_awesome),
+                    tooltip: 'הצעת עוגנים אוטומטית (AI)',
+                    onPressed: _runAiSuggest,
+                  ),
+          ],
         ),
         body: Column(
           children: [
-            Expanded(
-              child: _isOnMap ? _buildMapView() : _buildImageView(),
-            ),
+            Expanded(child: _isOnMap ? _buildMapView() : _buildImageView()),
 
             // הוראה
             Container(
@@ -268,8 +509,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             if (_points.isNotEmpty)
               SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
                 child: Row(
                   children: List.generate(_points.length, (i) {
                     final p = _points[i];
@@ -294,20 +537,40 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                           ),
                         ),
                         backgroundColor: isEditing ? Colors.blue[50] : null,
-                        onPressed:
-                            p.isComplete ? () => _showPointMenu(i) : null,
+                        onPressed: p.isComplete
+                            ? () => _showPointMenu(i)
+                            : null,
                       ),
                     );
                   }),
                 ),
               ),
 
-            // כפתורים
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-              child: _result != null
-                  ? _buildResultButtons()
-                  : _buildPickButtons(canCalculate),
+            // יישור TPS למפות לא-ישרות (מצולמות/משורטטות ביד)
+            if (GdalWarpService.isSupportedPlatform)
+              SwitchListTile(
+                dense: true,
+                value: _tpsMode,
+                onChanged: _warping
+                    ? null
+                    : (v) => setState(() => _tpsMode = v),
+                title: const Text('מפה לא ישרה — יישור עיוותים (TPS)'),
+                subtitle: _tpsMode
+                    ? const Text('מומלץ 5+ נקודות מפוזרות על כל המפה')
+                    : null,
+                secondary: const Icon(Icons.transform),
+              ),
+
+            // כפתורים — SafeArea + רווח תחתון ~1.5 ס"מ כדי לא להיחתך ע"י
+            // סרגל הניווט/gesture bar במובייל (כלל גלובלי לכל המסכים).
+            SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 56),
+                child: _result != null
+                    ? _buildResultButtons()
+                    : _buildPickButtons(canCalculate),
+              ),
             ),
           ],
         ),
@@ -359,9 +622,24 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         const SizedBox(width: 12),
         Expanded(
           child: ElevatedButton.icon(
-            onPressed: _confirm,
-            icon: const Icon(Icons.check),
-            label: const Text('אשר'),
+            onPressed: _warping ? null : _confirm,
+            icon: _warping
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(Icons.check),
+            label: Text(
+              _warping
+                  ? 'מיישר (TPS)...'
+                  : _tpsMode
+                  ? 'אשר ויישר (TPS)'
+                  : 'אשר',
+            ),
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.green,
               foregroundColor: Colors.white,
@@ -405,6 +683,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                   ),
                   // מרקרים אדומים ממוספרים
                   ..._buildImageMarkers(),
+                  // הצעות AI סגולות — ממתינות לאישור פר-נקודה
+                  ..._buildSuggestionMarkers(),
                 ],
               ),
             ),
@@ -476,7 +756,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                       overlayImages: [
                         OverlayImage(
                           bounds: LatLngBounds(
-                              _result!.southWest, _result!.northEast),
+                            _result!.southWest,
+                            _result!.northEast,
+                          ),
                           imageProvider: FileImage(File(widget.imagePath)),
                           opacity: 0.7,
                         ),
@@ -523,9 +805,46 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
               child: Text(
                 '${i + 1}',
                 style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold),
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }).toList();
+  }
+
+  /// סמני הצעות-AI סגולים על התמונה; לחיצה פותחת אישור/דחייה.
+  List<Widget> _buildSuggestionMarkers() {
+    final scale = _displayScale;
+    return _suggestions.asMap().entries.map((entry) {
+      final i = entry.key;
+      final s = entry.value;
+      return Positioned(
+        left: s.pixel.dx * scale - 14,
+        top: s.pixel.dy * scale - 14,
+        child: GestureDetector(
+          onTap: () => _showSuggestionDialog(i),
+          child: Tooltip(
+            message: s.name,
+            child: Container(
+              width: 28,
+              height: 28,
+              decoration: BoxDecoration(
+                color: Colors.purple,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 2),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black38, blurRadius: 4),
+                ],
+              ),
+              child: const Icon(
+                Icons.auto_awesome,
+                color: Colors.white,
+                size: 14,
               ),
             ),
           ),
@@ -575,28 +894,30 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                   .asMap()
                   .entries
                   .where((e) => e.value.isComplete)
-                  .map((entry) => Marker(
-                        point: entry.value.world!,
-                        width: 24,
-                        height: 24,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: Colors.green,
-                            shape: BoxShape.circle,
-                            border:
-                                Border.all(color: Colors.white, width: 2),
-                          ),
-                          child: Center(
-                            child: Text(
-                              '${entry.key + 1}',
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.bold),
+                  .map(
+                    (entry) => Marker(
+                      point: entry.value.world!,
+                      width: 24,
+                      height: 24,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.green,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
+                        child: Center(
+                          child: Text(
+                            '${entry.key + 1}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
                             ),
                           ),
                         ),
-                      ))
+                      ),
+                    ),
+                  )
                   .toList(),
             ),
           ],
@@ -617,21 +938,26 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                     tooltip: 'בחר מקור מפה',
                     onSelected: _refMap.setActive,
                     itemBuilder: (ctx) => sources
-                        .map((s) => PopupMenuItem(
-                              value: s,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (s.id == _refMap.active.id)
-                                    const Icon(Icons.check,
-                                        size: 16, color: Colors.green)
-                                  else
-                                    const SizedBox(width: 16),
-                                  const SizedBox(width: 6),
-                                  Text(s.displayName),
-                                ],
-                              ),
-                            ))
+                        .map(
+                          (s) => PopupMenuItem(
+                            value: s,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (s.id == _refMap.active.id)
+                                  const Icon(
+                                    Icons.check,
+                                    size: 16,
+                                    color: Colors.green,
+                                  )
+                                else
+                                  const SizedBox(width: 16),
+                                const SizedBox(width: 6),
+                                Text(s.displayName),
+                              ],
+                            ),
+                          ),
+                        )
                         .toList(),
                   ),
                 ),

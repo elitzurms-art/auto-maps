@@ -48,7 +48,7 @@ typedef _FreeDart = void Function(Pointer<Uint8> p);
 ///   OSGeo4W שמצורף ליד ה-exe (ראה windows/ecw_native/CMakeLists.txt). ה-DLL
 ///   מאותר בתיקיית ה-exe (חיפוש ה-DLL הרגיל של Windows), ומעגן בעצמו את נתיבי
 ///   GDAL_DATA/PROJ_DATA/gdalplugins המצורפים.
-DynamicLibrary _openEcwLibrary() {
+DynamicLibrary openEcwLibrary() {
   if (Platform.isAndroid) return DynamicLibrary.open('libauto_maps_ecw.so');
   if (Platform.isIOS) return DynamicLibrary.process();
   if (Platform.isWindows) return DynamicLibrary.open('auto_maps_ecw.dll');
@@ -75,7 +75,7 @@ class EcwGdalNative {
             _lib.lookupFunction<_RenderNative, _RenderDart>('ecw_render_tile'),
         _free = _lib.lookupFunction<_FreeNative, _FreeDart>('ecw_free');
 
-  factory EcwGdalNative() => EcwGdalNative._(_openEcwLibrary());
+  factory EcwGdalNative() => EcwGdalNative._(openEcwLibrary());
 
   // ignore: unused_field
   final DynamicLibrary _lib;

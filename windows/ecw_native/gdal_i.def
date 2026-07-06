@@ -19,3 +19,10 @@ GDALWarpAppOptionsNew
 GDALWarpAppOptionsFree
 GDALWarp
 GDALDatasetRasterIO
+GDALTranslateOptionsNew
+GDALTranslateOptionsFree
+GDALTranslate
+GDALGetDriverByName
+GDALCreateCopy
+GDALGetRasterBand
+GDALGetRasterColorTable

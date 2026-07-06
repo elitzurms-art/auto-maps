@@ -19,7 +19,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   String? _imagePath;
-  WorldFileResult? _result;
+  GeoreferenceOutcome? _outcome;
   final _exportService = LiveMapsExportService();
   final _picker = ImagePicker();
 
@@ -29,13 +29,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _captureImage() async {
     try {
-      final XFile? shot =
-          await _picker.pickImage(source: ImageSource.camera);
+      final XFile? shot = await _picker.pickImage(source: ImageSource.camera);
       final path = shot?.path;
       if (path == null) return;
       setState(() {
         _imagePath = path;
-        _result = null;
+        _outcome = null;
       });
       await _openGeoreference(path);
     } catch (e) {
@@ -56,25 +55,25 @@ class _HomeScreenState extends State<HomeScreen> {
     if (path == null) return;
     setState(() {
       _imagePath = path;
-      _result = null;
+      _outcome = null;
     });
     await _openGeoreference(path);
   }
 
   Future<void> _openGeoreference(String path) async {
-    final result = await Navigator.push<WorldFileResult>(
+    final outcome = await Navigator.push<GeoreferenceOutcome>(
       context,
       MaterialPageRoute(builder: (_) => GeoreferenceScreen(imagePath: path)),
     );
-    if (result != null) {
-      setState(() => _result = result);
+    if (outcome != null) {
+      setState(() => _outcome = outcome);
     }
   }
 
   Future<void> _export() async {
     final path = _imagePath;
-    final result = _result;
-    if (path == null || result == null) return;
+    final outcome = _outcome;
+    if (path == null || outcome == null) return;
 
     final defaultName = p.basenameWithoutExtension(path);
     final params = await showDialog<_ExportParams>(
@@ -84,19 +83,23 @@ class _HomeScreenState extends State<HomeScreen> {
     if (params == null) return;
 
     try {
+      // ב-TPS מייצאים את הרסטר המיושר שנוצר, לא את המקור.
       final out = await _exportService.export(
-        sourceImagePath: path,
-        result: result,
+        sourceImagePath: outcome.warpedImagePath ?? path,
+        result: outcome.result,
         name: params.name,
         targetDir: params.targetDir,
+        transform: outcome.transform,
       );
       if (!mounted) return;
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
-        ..showSnackBar(SnackBar(
-          content: Text('יוצא בהצלחה:\n${out.jsonPath}'),
-          duration: const Duration(seconds: 5),
-        ));
+        ..showSnackBar(
+          SnackBar(
+            content: Text('יוצא בהצלחה:\n${out.jsonPath}'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
@@ -108,7 +111,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final hasImage = _imagePath != null;
-    final hasResult = _result != null;
+    final hasResult = _outcome != null;
 
     return Directionality(
       textDirection: TextDirection.rtl,
@@ -117,65 +120,73 @@ class _HomeScreenState extends State<HomeScreen> {
         body: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 520),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Icon(Icons.map, size: 72, color: Colors.blueGrey),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'ייבא תמונת מפה, נעץ נקודות פיקסל↔עולם מול OpenStreetMap, '
-                    'וייצא שכבה ג\'יאורפרנסית לאפליקציית LiveMaps.',
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 32),
-                  ElevatedButton.icon(
-                    onPressed: _pickImage,
-                    icon: const Icon(Icons.image_search),
-                    label: const Text('בחר תמונה'),
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                    ),
-                  ),
-                  if (_cameraSupported) ...[
-                    const SizedBox(height: 12),
-                    OutlinedButton.icon(
-                      onPressed: _captureImage,
-                      icon: const Icon(Icons.photo_camera),
-                      label: const Text('צלם מפה'),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                      ),
-                    ),
-                  ],
-                  if (hasImage) ...[
-                    const SizedBox(height: 24),
-                    _InfoCard(imagePath: _imagePath!, result: _result),
+            child: SafeArea(
+              // רווח תחתון ~1.5 ס"מ בכל המסכים — שלא ייחתך ע"י ה-gesture bar.
+              minimum: const EdgeInsets.only(bottom: 56),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Icon(Icons.map, size: 72, color: Colors.blueGrey),
                     const SizedBox(height: 16),
-                    OutlinedButton.icon(
-                      onPressed: () => _openGeoreference(_imagePath!),
-                      icon: const Icon(Icons.edit_location_alt),
-                      label: Text(hasResult
-                          ? 'ערוך נעיצה מחדש'
-                          : 'המשך לנעיצת נקודות'),
+                    const Text(
+                      'ייבא תמונת מפה, נעץ נקודות פיקסל↔עולם מול OpenStreetMap, '
+                      'וייצא שכבה ג\'יאורפרנסית לאפליקציית LiveMaps.',
+                      textAlign: TextAlign.center,
                     ),
-                  ],
-                  if (hasResult) ...[
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 32),
                     ElevatedButton.icon(
-                      onPressed: _export,
-                      icon: const Icon(Icons.save_alt),
-                      label: const Text('ייצא ל-LiveMaps'),
+                      onPressed: _pickImage,
+                      icon: const Icon(Icons.image_search),
+                      label: const Text('בחר תמונה'),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.green,
-                        foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 16),
                       ),
                     ),
+                    if (_cameraSupported) ...[
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        onPressed: _captureImage,
+                        icon: const Icon(Icons.photo_camera),
+                        label: const Text('צלם מפה'),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                        ),
+                      ),
+                    ],
+                    if (hasImage) ...[
+                      const SizedBox(height: 24),
+                      _InfoCard(
+                        imagePath: _imagePath!,
+                        result: _outcome?.result,
+                        transform: _outcome?.transform,
+                      ),
+                      const SizedBox(height: 16),
+                      OutlinedButton.icon(
+                        onPressed: () => _openGeoreference(_imagePath!),
+                        icon: const Icon(Icons.edit_location_alt),
+                        label: Text(
+                          hasResult ? 'ערוך נעיצה מחדש' : 'המשך לנעיצת נקודות',
+                        ),
+                      ),
+                    ],
+                    if (hasResult) ...[
+                      const SizedBox(height: 12),
+                      ElevatedButton.icon(
+                        onPressed: _export,
+                        icon: const Icon(Icons.save_alt),
+                        label: const Text('ייצא ל-LiveMaps'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                        ),
+                      ),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
           ),
@@ -188,8 +199,9 @@ class _HomeScreenState extends State<HomeScreen> {
 class _InfoCard extends StatelessWidget {
   final String imagePath;
   final WorldFileResult? result;
+  final String? transform;
 
-  const _InfoCard({required this.imagePath, this.result});
+  const _InfoCard({required this.imagePath, this.result, this.transform});
 
   @override
   Widget build(BuildContext context) {
@@ -221,11 +233,16 @@ class _InfoCard extends StatelessWidget {
               if (r.se != null)
                 Text('SE: ${_fmt(r.se!.latitude)}, ${_fmt(r.se!.longitude)}'),
               const SizedBox(height: 4),
-              const Row(
+              Row(
                 children: [
-                  Icon(Icons.check_circle, color: Colors.green, size: 16),
-                  SizedBox(width: 4),
-                  Text('מוכן לייצוא', style: TextStyle(color: Colors.green)),
+                  const Icon(Icons.check_circle, color: Colors.green, size: 16),
+                  const SizedBox(width: 4),
+                  Text(
+                    transform == 'tps'
+                        ? 'מוכן לייצוא (יושר ב-TPS)'
+                        : 'מוכן לייצוא',
+                    style: const TextStyle(color: Colors.green),
+                  ),
                 ],
               ),
             ],
@@ -253,8 +270,9 @@ class _ExportDialog extends StatefulWidget {
 }
 
 class _ExportDialogState extends State<_ExportDialog> {
-  late final TextEditingController _nameCtrl =
-      TextEditingController(text: widget.defaultName);
+  late final TextEditingController _nameCtrl = TextEditingController(
+    text: widget.defaultName,
+  );
   String? _targetDir;
 
   @override
@@ -311,7 +329,9 @@ class _ExportDialogState extends State<_ExportDialog> {
           ElevatedButton(
             onPressed: (_targetDir != null && _nameCtrl.text.trim().isNotEmpty)
                 ? () => Navigator.pop(
-                    context, _ExportParams(_nameCtrl.text.trim(), _targetDir!))
+                    context,
+                    _ExportParams(_nameCtrl.text.trim(), _targetDir!),
+                  )
                 : null,
             child: const Text('ייצא'),
           ),

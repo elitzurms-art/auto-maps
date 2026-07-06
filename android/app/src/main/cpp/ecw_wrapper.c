@@ -58,6 +58,20 @@ extern GDALDatasetH GDALWarp(const char *pszDest, GDALDatasetH hDstDS,
                              int nSrcCount, GDALDatasetH *pahSrcDS,
                              GDALWarpAppOptionsH psOptions, int *pbUsageError);
 
+typedef void *GDALTranslateOptionsH;
+extern GDALTranslateOptionsH GDALTranslateOptionsNew(char **papszArgv, void *binary);
+extern void GDALTranslateOptionsFree(GDALTranslateOptionsH);
+extern GDALDatasetH GDALTranslate(const char *pszDest, GDALDatasetH hSrcDS,
+                                  GDALTranslateOptionsH psOptions,
+                                  int *pbUsageError);
+extern void *GDALGetDriverByName(const char *pszName);
+extern GDALDatasetH GDALCreateCopy(void *hDriver, const char *pszFilename,
+                                   GDALDatasetH hSrcDS, int bStrict,
+                                   char **papszOptions, void *pfnProgress,
+                                   void *pProgressData);
+extern void *GDALGetRasterBand(GDALDatasetH, int nBandId);
+extern void *GDALGetRasterColorTable(void *hBand);
+
 extern int GDALDatasetRasterIO(GDALDatasetH hDS, int eRWFlag, int nXOff,
                                int nYOff, int nXSize, int nYSize, void *pData,
                                int nBufXSize, int nBufYSize, int eBufType,
@@ -295,5 +309,121 @@ int ecw_render_tile(GDALDatasetH h, double minx, double miny, double maxx,
     return -6;
   }
   *out_rgba = buf;
+  return 0;
+}
+
+// Rectifies a distorted map image (hand-drawn / photographed, not exactly
+// straight) into a north-up WGS84 PNG using a Thin-Plate-Spline over the
+// user's control points — the gdalwarp -tps equivalent, in-process.
+//
+// gcps: gcp_count × 4 doubles, [pixel_x, pixel_y, lon, lat] per point (WGS84).
+// Writes dst_png_path (overwritten), fills out_gt6 with the output dataset's
+// geotransform (north-up: gt[2]==gt[4]==0) and out_size2 with {width, height}.
+// Returns 0 on success, negative on error.
+//
+// Pipeline: GDALTranslate (attach GCPs to a MEM copy — PNG can't store GCPs,
+// and PAM is disabled) → GDALWarp -tps to MEM → GDALCreateCopy to PNG.
+int ecw_warp_tps(const char *src_path, const char *dst_png_path, int gcp_count,
+                 const double *gcps, double *out_gt6, int *out_size2) {
+  ensure_registered();
+  if (!src_path || !dst_png_path || !gcps || !out_gt6 || !out_size2 ||
+      gcp_count < 3) {
+    return -1;
+  }
+
+  GDALDatasetH src = GDALOpen(src_path, /*GA_ReadOnly*/ 0);
+  if (!src) {
+    LOGE("warp_tps: open failed: %s — %s", src_path, CPLGetLastErrorMsg());
+    return -2;
+  }
+
+  // ── 1. Attach GCPs (+expand palette→rgba) via gdal_translate to MEM ──
+  int has_palette =
+      GDALGetRasterColorTable(GDALGetRasterBand(src, 1)) != NULL;
+  // argv: -of MEM -a_srs EPSG:4326 [-expand rgba] + 5 slots per GCP + NULL
+  int max_args = 6 + gcp_count * 5 + 1;
+  char **argv = (char **)calloc((size_t)max_args, sizeof(char *));
+  // 32 bytes per formatted number, 4 numbers per GCP
+  char *pool = (char *)malloc((size_t)gcp_count * 4 * 32);
+  if (!argv || !pool) {
+    free(argv); free(pool); GDALClose(src);
+    return -3;
+  }
+  int ai = 0;
+  argv[ai++] = "-of";    argv[ai++] = "MEM";
+  argv[ai++] = "-a_srs"; argv[ai++] = "EPSG:4326";
+  if (has_palette) { argv[ai++] = "-expand"; argv[ai++] = "rgba"; }
+  for (int i = 0; i < gcp_count; i++) {
+    argv[ai++] = "-gcp";
+    for (int j = 0; j < 4; j++) {
+      char *slot = pool + ((size_t)i * 4 + (size_t)j) * 32;
+      snprintf(slot, 32, "%.12g", gcps[i * 4 + j]);
+      argv[ai++] = slot;
+    }
+  }
+  argv[ai] = NULL;
+
+  GDALTranslateOptionsH topts = GDALTranslateOptionsNew(argv, NULL);
+  GDALDatasetH gcp_ds =
+      topts ? GDALTranslate("", src, topts, NULL) : NULL;
+  if (topts) GDALTranslateOptionsFree(topts);
+  free(argv);
+  free(pool);
+  if (!gcp_ds) {
+    LOGE("warp_tps: translate(GCP attach) failed: %s", CPLGetLastErrorMsg());
+    GDALClose(src);
+    return -4;
+  }
+
+  // ── 2. TPS warp to north-up WGS84 (alpha only if not already present) ──
+  int src_bands = GDALGetRasterCount(gcp_ds);
+  char *wargv[10];
+  int wi = 0;
+  wargv[wi++] = "-of";    wargv[wi++] = "MEM";
+  wargv[wi++] = "-tps";
+  wargv[wi++] = "-t_srs"; wargv[wi++] = "EPSG:4326";
+  wargv[wi++] = "-r";     wargv[wi++] = "bilinear";
+  if (src_bands < 4) wargv[wi++] = "-dstalpha";
+  wargv[wi] = NULL;
+
+  GDALWarpAppOptionsH wopts = GDALWarpAppOptionsNew(wargv, NULL);
+  int usage_err = 0;
+  GDALDatasetH warped =
+      wopts ? GDALWarp("", NULL, 1, &gcp_ds, wopts, &usage_err) : NULL;
+  if (wopts) GDALWarpAppOptionsFree(wopts);
+  GDALClose(gcp_ds);
+  GDALClose(src);
+  if (!warped) {
+    LOGE("warp_tps: GDALWarp failed (usageErr=%d): %s", usage_err,
+         CPLGetLastErrorMsg());
+    return -5;
+  }
+
+  // ── 3. Emit PNG + report geotransform/size ──
+  if (GDALGetGeoTransform(warped, out_gt6) != 0) {
+    LOGE("warp_tps: no geotransform on warped result");
+    GDALClose(warped);
+    return -6;
+  }
+  out_size2[0] = GDALGetRasterXSize(warped);
+  out_size2[1] = GDALGetRasterYSize(warped);
+
+  void *png_drv = GDALGetDriverByName("PNG");
+  if (!png_drv) {
+    LOGE("warp_tps: PNG driver missing");
+    GDALClose(warped);
+    return -7;
+  }
+  GDALDatasetH out = GDALCreateCopy(png_drv, dst_png_path, warped,
+                                    /*bStrict*/ 0, NULL, NULL, NULL);
+  GDALClose(warped);
+  if (!out) {
+    LOGE("warp_tps: PNG CreateCopy failed: %s — %s", dst_png_path,
+         CPLGetLastErrorMsg());
+    return -8;
+  }
+  GDALClose(out);
+  LOGI("warp_tps ok: %s (%dx%d, %d GCPs)", dst_png_path, out_size2[0],
+       out_size2[1], gcp_count);
   return 0;
 }

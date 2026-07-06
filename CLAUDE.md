@@ -5,7 +5,9 @@
 אפליקציית **Flutter** ייעודית (single-purpose) שממירה מפה משורטטת/תמונה לשכבה ג'יאורפרנסית שאפליקציית **LiveMaps** (`C:\LiveMaps`) צורכת. **Desktop-first (Windows)**, גם Android/iOS/macOS/Linux. GitHub: `elitzurms-art/auto-maps` (public). נגזר מפיצ'ר הג'יאורפרנס של `C:\navigate` (‏`world_file_parser_service.dart` הועתק as-is; `georeference_screen.dart` רוזז מ-`MapConfig`/`TopoLayerService`).
 
 ## הזרימה
-ייבוא תמונה → נעיצת נקודות **פיקסל↔עולם** מול מפת-ייחוס → חישוב **affine** (least-squares) → ייצוא. package: `com.elitzur.auto_maps`.
+ייבוא תמונה → נעיצת נקודות **פיקסל↔עולם** מול מפת-ייחוס → חישוב **affine** (least-squares) *או* **יישור TPS** למפות לא-ישרות (מתג במסך הנעיצה; `gdal_warp_service.dart` → `ecw_warp_tps` ב-wrapper) → ייצוא. **מצב אוטומטי:** כפתור ✨ במסך הנעיצה שולח את התמונה ל-**Gemini** (`gemini_anchor_service.dart`, מפתח API ב-shared_preferences) ומקבל הצעות עוגנים — **אישור פר-נקודה** (סמנים סגולים). package: `com.elitzur.auto_maps`.
+
+**כלל UI:** בכל מסך — SafeArea + רווח תחתון ~1.5 ס"מ (≈56lp) שכפתורים לא ייחתכו ע"י ה-gesture bar במובייל.
 
 ## פורמט ההעברה ל-LiveMaps (קנוני — חייב להתאים לצרכן)
 `livemaps_export_service.dart` כותב ל-`oflline_map` (או Drive מסונכרן):
@@ -36,13 +38,13 @@ FFI ל-GDAL דרך `ecw_wrapper.c` המשותף (מ-navigate). `ecw_gdal_decoder
 - `lib/services/world_file_parser_service.dart` — **ליבת ה-affine** + CRS (ITM/UTM36N/Old-Israel/WGS84 דרך proj4dart) + פרסור world-file/GeoTIFF/KMZ. הורחב ל-4 פינות אמיתיות (`cornersWgs84`, סדר NW/NE/SE/SW — לא bbox).
 - `lib/services/reference_map_controller.dart` — הבורר + מקורות + סריקת תיקייה.
 - `lib/services/ecw/` — `native_ecw_service.dart` (facade), `ecw_gdal_decoder.dart` (FFI), `ecw_gdal_tile_provider.dart`.
-- `lib/services/livemaps_export_service.dart` — הייצוא.
-- `lib/screens/georeference_screen.dart` — מסך הנעיצה. `home_screen.dart` — בחירת תמונה→נעיצה→ייצוא.
+- `lib/services/livemaps_export_service.dart` — הייצוא (פרמטר `transform`: affine/tps).
+- `lib/services/gdal_warp_service.dart` — **יישור TPS** (FFI ל-`ecw_warp_tps` ב-wrapper; רץ ב-Isolate.run). ה-C: translate מצרף GCPs ל-MEM (+expand rgba לפלטה) → GDALWarp ‎-tps ל-WGS84 → CreateCopy PNG. הפלט: PNG מיושר-צפון + geotransform. ⚠️ סימבולים חדשים ב-`gdal_i.def` מחייבים ריצת `lib /def:gdal_i.def /machine:x64 /out:gdal_i.lib`.
+- `lib/services/gemini_anchor_service.dart` — **המצב האוטומטי**: מקטין ל-1600px, שולח ל-`gemini-2.5-flash` עם responseSchema, מקבל עוגנים (pixel+world+שם+ביטחון) וממפה חזרה למימדי המקור.
+- `lib/screens/georeference_screen.dart` — מסך הנעיצה: מתג TPS, כפתור ✨ AI, סמני הצעות סגולים עם אישור/דחייה פר-נקודה. מחזיר `GeoreferenceOutcome` (result+transform+warpedImagePath). `home_screen.dart` — בחירת תמונה→נעיצה→ייצוא.
 
 ## TODO / phases עתידיים
-- **הרצה-אמיתית** של Android (APK+מכשיר) ו-iOS/macOS (דרך ה-CI).
-- **TPS (phase 2)** — `gdalwarp -tps` עם GCPs (`GdalWarpService` שמריץ את GDAL המצורף); הפלט נשאר רסטר-מיושר + פינות, אז צרכן ה-LiveMaps לא משתנה.
-- **Gemini (phase 3)** — הצעת עוגנים סמנטית (למפות משורטטות: OCR שמות/גאומטריית כבישים/רשת ית"מ) עם **אישור פר-נקודה**; מצב ידני נשאר כמו היום. חבילת `http` כבר קיימת.
+- **הרצה-אמיתית** של iOS/macOS (דרך ה-CI). Android ✅ רץ על מכשיר (2026-07-06).
 - **הקטנת בנדל ה-136MB** — build מותאם של GDAL (בלי arrow/poppler/hdf5...) אם צריך.
 
 ## קשור

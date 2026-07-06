@@ -28,12 +28,16 @@ class LiveMapsExportService {
   ///
   /// [cornersWgs84] בסדר NW, NE, SE, SW. אם null — נגזרות מ-bbox
   /// (SW/NE) של [result] כ-fallback (מאבד סיבוב, מיושר-צפון).
+  ///
+  /// [transform] — "affine" (ברירת מחדל) או "tps" כשהתמונה כבר עברה יישור
+  /// TPS (הרסטר שמיוצא כבר מיושר; החוזה מול LiveMaps נשאר רסטר + פינות).
   Future<LiveMapsExportResult> export({
     required String sourceImagePath,
     required WorldFileResult result,
     required String name,
     required String targetDir,
     String sourceCrs = 'EPSG:2039',
+    String transform = 'affine',
   }) async {
     final dir = Directory(targetDir);
     if (!dir.existsSync()) {
@@ -57,7 +61,7 @@ class LiveMapsExportService {
       'image': '$safeName.png',
       'imageWidth': result.imageWidth,
       'imageHeight': result.imageHeight,
-      'transform': 'affine',
+      'transform': transform,
       'corners': {
         'nw': _latLon(corners[0]),
         'ne': _latLon(corners[1]),
