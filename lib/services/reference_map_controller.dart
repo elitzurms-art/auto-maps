@@ -7,14 +7,14 @@ import 'package:flutter_map_mbtiles/flutter_map_mbtiles.dart';
 import 'package:mbtiles/mbtiles.dart';
 import 'package:path/path.dart' as p;
 
-import 'ecw/ecw_tile_layer_factory.dart';
-import 'ecw/ecw_tile_server.dart';
-
 /// מקור אריחים למפת-הייחוס (רקע לנעיצת נקודות עולם).
 ///
 /// כל מימוש מספק שכבת-אריחים ל-FlutterMap. מקורות שדורשים אתחול כבד
-/// (הרצת sidecar, פתיחת בסיס-נתונים) עושים זאת ב-[activate] ומשחררים
+/// (פתיחת בסיס-נתונים, הרצת sidecar וכד') עושים זאת ב-[activate] ומשחררים
 /// ב-[deactivate]; [isReady] מציין מתי [buildTileLayer] בטוח לקריאה.
+///
+/// ההפשטה פתוחה להרחבה — מקורות נוספים (למשל ECW נייטיבי) יכולים לממש אותה
+/// ולהיווסף ל-[ReferenceMapController] בלי לשנות את המסך.
 abstract class ReferenceMapSource {
   /// מזהה ייחודי (לשמירת בחירה ב-shared_preferences וכד').
   String get id;
@@ -88,8 +88,8 @@ class MbtilesReferenceSource implements ReferenceMapSource {
   @override
   Future<void> activate() async {
     if (_mbtiles != null) return;
-    // פתיחה סינכרונית (sqlite) — עטוף ב-async כדי לא לחסום את ה-UI thread
-    // מעבר לצורך, ולהתאים לחוזה של ReferenceMapSource.
+    // פתיחה סינכרונית (sqlite) — עטוף ב-async כדי להתאים לחוזה של
+    // ReferenceMapSource ולאפשר אתחול-רקע במעבר-מקור.
     _mbtiles = MbTiles(mbtilesPath: filePath);
   }
 
@@ -112,66 +112,12 @@ class MbtilesReferenceSource implements ReferenceMapSource {
   }
 }
 
-/// מקור ECW ortho — מריץ את ה-sidecar (Python + GDAL דרך OSGeo4W) על
-/// קובץ `.ecw` ומגיש אריחים ל-FlutterMap. ה-sidecar עולה ב-[activate]
-/// ונהרג ב-[deactivate] (וגם אוטומטית בסגירת האפליקציה דרך JobObject).
-class EcwReferenceSource implements ReferenceMapSource {
-  EcwReferenceSource({
-    required this.ecwPath,
-    required this.scriptPath,
-    this.osgeo4wBat = defaultOsgeo4wBat,
-  })  : id = 'ecw:$ecwPath',
-        displayName = 'ECW · ${p.basenameWithoutExtension(ecwPath)}';
-
-  static const String defaultOsgeo4wBat = r'C:\OSGeo4W\OSGeo4W.bat';
-
-  final String ecwPath;
-  final String scriptPath;
-  final String osgeo4wBat;
-
-  @override
-  final String id;
-
-  @override
-  final String displayName;
-
-  EcwTileServer? _server;
-
-  @override
-  bool get isReady => _server?.tileUrlTemplate != null;
-
-  @override
-  Future<void> activate() async {
-    if (_server?.tileUrlTemplate != null) return;
-    final server = EcwTileServer(
-      ecwPath: ecwPath,
-      scriptPath: scriptPath,
-      osgeo4wBat: osgeo4wBat,
-    );
-    await server.start();
-    _server = server;
-  }
-
-  @override
-  Future<void> deactivate() async {
-    final s = _server;
-    _server = null;
-    await s?.stop();
-  }
-
-  @override
-  Widget buildTileLayer() {
-    final s = _server;
-    if (s == null || s.tileUrlTemplate == null) return const SizedBox.shrink();
-    return ecwTileLayer(server: s);
-  }
-}
-
 /// בקר מפת-הייחוס. מנהל את רשימת המקורות והמקור הפעיל, כולל אתחול/שחרור
-/// א-סינכרוני של מקורות כבדים (ECW / MBTiles) וגילוי אוטומטי של קבצי מפה
+/// א-סינכרוני של מקורות כבדים (MBTiles) וגילוי אוטומטי של קבצי מפה
 /// בתיקיית-ייחוס.
 ///
 /// הבורר במסך מופיע אוטומטית כש-[availableSources] מחזירה יותר ממקור אחד.
+/// אפשר להוסיף מקורות נוספים (למשל ECW) דרך [addSource].
 class ReferenceMapController extends ChangeNotifier {
   ReferenceMapController({List<ReferenceMapSource>? sources})
       : _sources = List<ReferenceMapSource>.from(
@@ -186,21 +132,30 @@ class ReferenceMapController extends ChangeNotifier {
   bool _switching = false;
   String? _lastError;
 
-  /// כל המקורות הזמינים (OSM + כל מה שהתגלה בתיקיית-הייחוס).
+  /// כל המקורות הזמינים (OSM + כל מה שהתגלה בתיקיית-הייחוס / נוסף ידנית).
   List<ReferenceMapSource> availableSources() => List.unmodifiable(_sources);
 
   ReferenceMapSource get active => _active;
 
-  /// `true` בזמן החלפת מקור (הרצת sidecar / פתיחת DB) — המסך יכול להציג טעינה.
+  /// `true` בזמן החלפת מקור (פתיחת DB / אתחול) — המסך יכול להציג טעינה.
   bool get isSwitching => _switching;
 
-  /// שגיאת ההחלפה האחרונה (למשל sidecar נכשל); `null` אם הכל תקין.
+  /// שגיאת ההחלפה האחרונה; `null` אם הכל תקין.
   String? get lastError => _lastError;
 
   /// שכבת האריחים של המקור הפעיל. בזמן החלפה / לפני שהמקור מוכן — לא מצייר כלום.
   Widget buildActiveTileLayer() {
     if (_switching || !_active.isReady) return const SizedBox.shrink();
     return _active.buildTileLayer();
+  }
+
+  /// הוספת מקור בודד לבורר (נקודת-הרחבה לסוכנים אחרים, למשל מקור ECW).
+  /// מדלג אם מזהה זהה כבר קיים. מחזיר `true` אם נוסף.
+  bool addSource(ReferenceMapSource source) {
+    if (_sources.any((s) => s.id == source.id)) return false;
+    _sources.add(source);
+    notifyListeners();
+    return true;
   }
 
   /// החלפת המקור הפעיל. מאתחל את החדש, ורק בהצלחה משחרר את הישן.
@@ -229,52 +184,28 @@ class ReferenceMapController extends ChangeNotifier {
     }
   }
 
-  /// מוסיף קובץ ECW יחיד (בחירת המשתמש) כמקור בבורר. מדלג אם כבר קיים או
-  /// אם OSGeo4W/הסקריפט לא זמינים. מחזיר את המקור שנוסף, או `null`.
-  EcwReferenceSource? addEcwFile(String ecwPath) {
-    if (!ecwToolingAvailable) return null;
-    final script = _resolveEcwScript();
-    if (script == null) return null;
-    final id = 'ecw:$ecwPath';
-    if (_sources.any((s) => s.id == id)) return null;
-    final src = EcwReferenceSource(ecwPath: ecwPath, scriptPath: script);
-    _sources.add(src);
-    notifyListeners();
-    return src;
-  }
-
-  /// סורק תיקיית-מפות ומוסיף כל קובץ מפה נתמך (`.mbtiles`, `.ecw`) כמקור
-  /// נפרד בבורר. מקורות-תיקייה קודמים מוסרים (החלפת התיקייה הפעילה).
-  /// מקורות ECW נוספים רק אם כלי OSGeo4W זמינים (degrade gracefully).
+  /// סורק תיקיית-מפות ומוסיף כל קובץ מפה נתמך (`.mbtiles`) כמקור נפרד בבורר.
+  /// מקורות-תיקייה קודמים מוסרים (החלפת התיקייה הפעילה); מקורות שנוספו
+  /// באמצעים אחרים (OSM / [addSource]) נשמרים.
   Future<void> loadFolder(String folderPath) async {
     final dir = Directory(folderPath);
     if (!dir.existsSync()) return;
 
-    // הסרת מקורות-תיקייה קודמים (משאירים OSM + מקורות שנוספו ידנית נשמרים
-    // אם הם עדיין מצביעים לתוך התיקייה החדשה — אבל הדרך הפשוטה: להשאיר את
-    // כל מה שאינו נגזר-תיקייה, ולבנות מחדש את הנגזרים).
     final activeId = _active.id;
     _sources.removeWhere((s) => _folderDerivedIds.contains(s.id));
     _folderDerivedIds.clear();
 
-    final script = _resolveEcwScript();
-    final ecwOk = ecwToolingAvailable && script != null;
-
-    final files = dir
-        .listSync(followLinks: false)
-        .whereType<File>()
-        .toList()
-      ..sort((a, b) =>
-          p.basename(a.path).toLowerCase().compareTo(
-              p.basename(b.path).toLowerCase()));
+    final files = dir.listSync(followLinks: false).whereType<File>().toList()
+      ..sort((a, b) => p
+          .basename(a.path)
+          .toLowerCase()
+          .compareTo(p.basename(b.path).toLowerCase()));
 
     for (final f in files) {
       final ext = p.extension(f.path).toLowerCase();
       ReferenceMapSource? src;
       if (ext == '.mbtiles') {
         src = MbtilesReferenceSource(filePath: f.path);
-      } else if (ext == '.ecw' && ecwOk) {
-        src = EcwReferenceSource(ecwPath: f.path, scriptPath: script);
       }
       if (src == null) continue;
       if (_sources.any((s) => s.id == src!.id)) continue;
@@ -306,13 +237,6 @@ class ReferenceMapController extends ChangeNotifier {
     super.dispose();
   }
 
-  // ═══ עזרי-מיקום (resolve של קבצים/תיקיות בזמן ריצה) ═══
-
-  /// `true` אם OSGeo4W.bat (עם דרייבר ECW) קיים במחשב.
-  static bool get ecwToolingAvailable =>
-      Platform.isWindows &&
-      File(EcwReferenceSource.defaultOsgeo4wBat).existsSync();
-
   /// תיקיית-הייחוס המשתמעת — הראשונה מבין המועמדות שקיימת.
   static String? defaultFolder() {
     return _firstExistingDir(<String>[
@@ -321,28 +245,9 @@ class ReferenceMapController extends ChangeNotifier {
     ]);
   }
 
-  /// איתור סקריפט ה-sidecar (`ecw_tile_server.py`) בזמן ריצה.
-  static String? _resolveEcwScript() {
-    final exeDir = File(Platform.resolvedExecutable).parent.path;
-    return _firstExistingFile(<String>[
-      p.join(Directory.current.path, 'scripts', 'ecw_tile_server.py'),
-      p.join(exeDir, 'scripts', 'ecw_tile_server.py'),
-      // build\windows\x64\runner\Debug\<app>.exe → שורש הפרויקט (5 רמות מעלה)
-      p.normalize(p.join(exeDir, '..', '..', '..', '..', '..', 'scripts',
-          'ecw_tile_server.py')),
-    ]);
-  }
-
   static String? _firstExistingDir(List<String> candidates) {
     for (final c in candidates) {
       if (Directory(c).existsSync()) return c;
-    }
-    return null;
-  }
-
-  static String? _firstExistingFile(List<String> candidates) {
-    for (final c in candidates) {
-      if (File(c).existsSync()) return c;
     }
     return null;
   }

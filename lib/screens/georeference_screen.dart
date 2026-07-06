@@ -113,28 +113,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
               : 'לא נמצאו קבצי מפה נתמכים בתיקייה')));
   }
 
-  /// בחירת קובץ ECW יחיד והוספתו כמקור אורתופוטו.
-  Future<void> _pickEcwFile() async {
-    final res = await FilePicker.platform.pickFiles(
-      dialogTitle: 'בחר קובץ ECW (אורתופוטו)',
-      type: FileType.custom,
-      allowedExtensions: ['ecw'],
-    );
-    final path = res?.files.single.path;
-    if (path == null) return;
-    final src = _refMap.addEcwFile(path);
-    if (!mounted) return;
-    if (src == null) {
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(const SnackBar(
-            content: Text('הקובץ כבר קיים או ש-OSGeo4W אינו מותקן')));
-      return;
-    }
-    // הפעלה מיידית של המקור שנבחר.
-    await _refMap.setActive(src);
-  }
-
   Future<void> _loadImageSize() async {
     final bytes = await File(widget.imagePath).readAsBytes();
     final codec = await ui.instantiateImageCodec(bytes);
@@ -667,18 +645,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                   onPressed: _pickReferenceFolder,
                 ),
               ),
-              if (ReferenceMapController.ecwToolingAvailable) ...[
-                const SizedBox(height: 6),
-                Material(
-                  elevation: 2,
-                  borderRadius: BorderRadius.circular(8),
-                  child: IconButton(
-                    icon: const Icon(Icons.satellite_alt),
-                    tooltip: 'הוסף אורתופוטו ECW',
-                    onPressed: _pickEcwFile,
-                  ),
-                ),
-              ],
             ],
           ),
         ),
