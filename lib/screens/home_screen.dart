@@ -1,5 +1,8 @@
+import 'dart:io' show Platform;
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 
 import '../services/livemaps_export_service.dart';
@@ -18,6 +21,30 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _imagePath;
   WorldFileResult? _result;
   final _exportService = LiveMapsExportService();
+  final _picker = ImagePicker();
+
+  /// צילום-מצלמה נתמך רק במובייל (Android/iOS). ב-desktop אין מצלמת-מובייל
+  /// טיפוסית, לכן מסתירים את הכפתור ומשתמשים ב"בחר תמונה" בלבד.
+  bool get _cameraSupported => Platform.isAndroid || Platform.isIOS;
+
+  Future<void> _captureImage() async {
+    try {
+      final XFile? shot =
+          await _picker.pickImage(source: ImageSource.camera);
+      final path = shot?.path;
+      if (path == null) return;
+      setState(() {
+        _imagePath = path;
+        _result = null;
+      });
+      await _openGeoreference(path);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(content: Text('שגיאת צילום: $e')));
+    }
+  }
 
   Future<void> _pickImage() async {
     final res = await FilePicker.platform.pickFiles(
@@ -112,6 +139,17 @@ class _HomeScreenState extends State<HomeScreen> {
                       padding: const EdgeInsets.symmetric(vertical: 16),
                     ),
                   ),
+                  if (_cameraSupported) ...[
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: _captureImage,
+                      icon: const Icon(Icons.photo_camera),
+                      label: const Text('צלם מפה'),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                      ),
+                    ),
+                  ],
                   if (hasImage) ...[
                     const SizedBox(height: 24),
                     _InfoCard(imagePath: _imagePath!, result: _result),

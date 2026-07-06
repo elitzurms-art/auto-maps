@@ -2,6 +2,10 @@
     <!-- נדרש להורדת אריחי OpenStreetMap (מפת-הייחוס) -->
     <uses-permission android:name="android.permission.INTERNET"/>
 
+    <!-- נדרש לצילום מפה במצלמת המכשיר -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+
     <application
         android:label="Auto Maps"
         android:name="${applicationName}"
