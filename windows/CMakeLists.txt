@@ -91,6 +91,17 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
+# GDAL (gdal313.dll / proj_9.dll) זקוק ל-sqlite3.dll המלא של OSGeo4W
+# (sqlite3_column_table_name וכו'). sqlite3_flutter_libs מתקין sqlite3.dll
+# מינימלי באותו שם שדורס אותו ושובר את טעינת auto_maps_ecw.dll (שגיאה 127).
+# ה-API הסטנדרטי קיים בשניהם, אז הגרסה המלאה משרתת גם את חבילת sqlite3 של
+# Dart. מוצהר אחרי התקנת ספריות הפלאגינים בכוונה — כלל ה-install האחרון מנצח.
+if(EXISTS "${OSGEO4W_ROOT}/bin/sqlite3.dll")
+  install(FILES "${OSGEO4W_ROOT}/bin/sqlite3.dll"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()
+
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"
