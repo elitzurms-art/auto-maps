@@ -1,0 +1,66 @@
+# iOS Podfile for auto_maps.
+#
+# Standard Flutter iOS Podfile + a CONDITIONAL native ECW pod (auto_maps_ecw),
+# mirroring navigate's approach. The ECW pod links the prebuilt GDAL+PROJ+ECW
+# static stack (gdal_ecw.xcframework), which is produced BEFORE `pod install` by
+# ios_native/build_gdal_xcframework.sh into ios/gdal_ecw/. If that prebuild did
+# not run (or failed), the pod is simply skipped and the app builds without
+# ECW-on-iOS — nothing breaks.
+#
+# platform 16.0: the ECW podspec requires iOS 16.0. Kept here so the deployment
+# target is consistent whether or not the conditional pod is active.
+platform :ios, '16.0'
+
+# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_ios_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+  use_modular_headers!
+
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+
+  # Native ECW satellite decode (GDAL+PROJ+ECW SDK 3.3). The stack is produced by
+  # ios_native/build_gdal_xcframework.sh into ios/gdal_ecw/ BEFORE pod install.
+  # Conditional on purpose: a build without that prebuild step is unaffected
+  # (the pod is skipped — no ECW-on-iOS, but nothing breaks).
+  if File.exist?(File.join(__dir__, 'gdal_ecw', 'gdal_ecw.xcframework', 'Info.plist'))
+    pod 'auto_maps_ecw', :path => '.'
+    puts "📦 auto_maps_ecw: linking native ECW stack (gdal_ecw.xcframework present)"
+  else
+    puts "ℹ️  auto_maps_ecw: gdal_ecw.xcframework absent — ECW-on-iOS disabled for this build"
+  end
+
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target)
+  end
+end

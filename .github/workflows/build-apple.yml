@@ -1,0 +1,113 @@
+name: Build Apple (iOS + macOS)
+
+# Builds auto_maps for iOS and macOS on a macOS runner, mirroring navigate's
+# Apple CI. The key trick is the native ECW satellite decoder: BEFORE `pod
+# install`, we cross-compile the GDAL+PROJ+ECW static stack into a
+# gdal_ecw.xcframework (ios_native/build_gdal_xcframework.sh). The conditional
+# pod in ios/Podfile activates only if that xcframework is present, so the whole
+# ECW step is best-effort — a failure must NOT break the app build.
+#
+# Not codesigned (no Apple secrets required): `flutter build ios --no-codesign`
+# for iOS, `flutter build macos` for macOS. Manual trigger + on push to master.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+    paths:
+      - '.github/workflows/build-apple.yml'
+      - 'ios/**'
+      - 'macos/**'
+      - 'ios_native/**'
+      - 'scripts/**'
+      - 'lib/**'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+
+# Flutter toolchain — pinned to match the project (.metadata / Dart SDK ^3.11.1).
+env:
+  FLUTTER_VERSION: '3.41.4'
+
+jobs:
+  build-apple:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Show toolchain
+        run: |
+          flutter --version
+          cmake --version || true
+          xcodebuild -version || true
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      # Native ECW satellite decode for iOS: build the GDAL+PROJ+ECW xcframework
+      # BEFORE pod install (the conditional pod in ios/Podfile activates only when
+      # ios/gdal_ecw/gdal_ecw.xcframework exists). Cached on the build inputs so
+      # it's ~free on unchanged runs.
+      #
+      # continue-on-error: a failure here must NOT break the build — the Podfile
+      # then simply skips the ECW pod and the app builds without ECW-on-iOS.
+      # (NOTE: the script also needs ios_native/ecw_spike/ + native GDAL/ECW
+      # sources; until those land, this step is expected to fail gracefully and
+      # the app builds ECW-less — which is exactly what the guard is for.)
+      - name: Cache GDAL/ECW iOS xcframework
+        uses: actions/cache@v4
+        with:
+          path: ios/gdal_ecw
+          key: gdal-ecw-ios-v1-${{ hashFiles('ios_native/build_gdal_xcframework.sh', 'scripts/fetch_gdal_stack.sh', 'scripts/download_libecw.sh') }}
+
+      - name: Build native ECW stack (GDAL+PROJ+ECW)
+        continue-on-error: true
+        run: bash ios_native/build_gdal_xcframework.sh
+
+      # ── iOS ────────────────────────────────────────────────────────────────
+      # `--config-only` generates ios/Flutter/Generated.xcconfig (which the
+      # committed Podfile reads) without compiling.
+      - name: iOS — configure (generate xcconfig)
+        run: flutter build ios --config-only --no-codesign --debug
+
+      - name: iOS — pod install
+        working-directory: ios
+        run: pod install --repo-update
+
+      - name: iOS — confirm ECW pod state
+        run: |
+          echo "=== auto_maps_ecw in ios/Podfile.lock ==="
+          grep -i auto_maps_ecw ios/Podfile.lock || echo "(ECW pod not linked — building without ECW-on-iOS)"
+
+      - name: iOS — flutter build ios (no codesign, debug)
+        run: flutter build ios --no-codesign --debug
+
+      # ── macOS ──────────────────────────────────────────────────────────────
+      # No ECW podspec for macOS (the podspec is iOS-only), so macOS builds the
+      # plain Flutter app. `--config-only` generates the macOS Podfile + xcconfig.
+      - name: macOS — configure (generate xcconfig)
+        run: flutter build macos --config-only --debug
+
+      - name: macOS — pod install
+        working-directory: macos
+        run: pod install --repo-update
+
+      - name: macOS — flutter build macos (debug)
+        run: flutter build macos --debug
+
+      - name: Upload build outputs
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto_maps-apple-debug
+          path: |
+            build/ios/iphoneos/Runner.app
+            build/macos/Build/Products/Debug/*.app
+          if-no-files-found: warn
