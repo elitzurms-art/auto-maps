@@ -263,12 +263,25 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         imageWidth: _imageWidth,
         imageHeight: _imageHeight,
         apiKey: key,
+        onStatus: (status) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context)
+            ..clearSnackBars()
+            ..showSnackBar(
+              SnackBar(
+                content: Text(status),
+                duration: const Duration(minutes: 2),
+              ),
+            );
+        },
       );
       if (!mounted) return;
       setState(() {
         _suggestions = suggestions;
         _isOnMap = false; // ההצעות מוצגות על התמונה
       });
+      final verifiedCount =
+          suggestions.where((s) => s.verified == true).length;
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
         ..showSnackBar(
@@ -276,7 +289,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             content: Text(
               suggestions.isEmpty
                   ? 'לא זוהו עוגנים בביטחון מספיק — נעץ ידנית'
-                  : 'נתקבלו ${suggestions.length} הצעות — לחץ על סמן סגול לאישור',
+                  : 'נתקבלו ${suggestions.length} הצעות '
+                        '($verifiedCount אומתו מול מפת הייחוס) — '
+                        'לחץ על סמן סגול לאישור',
             ),
             duration: const Duration(seconds: 5),
           ),
@@ -338,61 +353,296 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   }
 
   /// אישור/דחייה של הצעת-עוגן בודדת — הלב של "אישור פר-נקודה".
+  ///
+  /// הדיאלוג מציג את הנקודה על מפת-ייחוס (מפה/לוויין), וכשיש מספיק נקודות
+  /// (3+ מאושרות+מוצעות) — גם את המפה החדשה עצמה שקופה מעל הרקע, עם סליידר
+  /// שקיפות, כדי לשפוט ויזואלית אם העיגון נכון.
   void _showSuggestionDialog(int index) {
     final s = _suggestions[index];
+
+    // affine זמני מכל הנקודות הידועות (מאושרות + כל ההצעות) — רק לתצוגת
+    // השילוב-השקוף; לא נשמר. bounds מיושר-צירים, אז סיבוב יוצג בקירוב.
+    WorldFileResult? provisional;
+    final ctrlPts = [
+      ..._points
+          .where((p) => p.isComplete)
+          .map((p) => (pixel: p.pixel, world: p.world!)),
+      ..._suggestions.map((g) => (pixel: g.pixel, world: g.world)),
+    ];
+    if (ctrlPts.length >= 3 && _imageWidth > 0) {
+      try {
+        provisional = WorldFileParserService.calculateFromControlPoints(
+          points: ctrlPts,
+          imageWidth: _imageWidth,
+          imageHeight: _imageHeight,
+        );
+      } catch (_) {}
+    }
+
+    double overlayOpacity = 0.55;
+    bool satellite = false;
+
     showDialog<void>(
       context: context,
       builder: (ctx) => Directionality(
         textDirection: TextDirection.rtl,
-        child: AlertDialog(
-          title: Row(
-            children: [
-              const Icon(Icons.auto_awesome, color: Colors.purple, size: 20),
-              const SizedBox(width: 8),
-              Expanded(child: Text(s.name)),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('זוהה לפי: ${s.basis}'),
-              Text('ביטחון: ${(s.confidence * 100).round()}%'),
-              const SizedBox(height: 4),
-              Text(
-                '${s.world.latitude.toStringAsFixed(6)}, '
-                '${s.world.longitude.toStringAsFixed(6)}',
-                style: const TextStyle(fontSize: 12, color: Colors.grey),
+        child: StatefulBuilder(
+          builder: (ctx, setDlg) => Dialog(
+            insetPadding: const EdgeInsets.all(16),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.auto_awesome,
+                          color: Colors.purple,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            s.name,
+                            style: Theme.of(ctx).textTheme.titleMedium,
+                          ),
+                        ),
+                        _verificationBadge(s),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'זוהה לפי: ${s.basis} · ביטחון: '
+                          '${(s.confidence * 100).round()}%',
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                        if (s.verifyNote != null && s.verifyNote!.isNotEmpty)
+                          Text(
+                            'אימות: ${s.verifyNote}',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: s.verified == false
+                                  ? Colors.red[700]
+                                  : Colors.grey[700],
+                            ),
+                          ),
+                        Text(
+                          '${s.world.latitude.toStringAsFixed(6)}, '
+                          '${s.world.longitude.toStringAsFixed(6)}',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  // הנקודה על מפת-הייחוס, עם שילוב-שקוף של המפה החדשה
+                  SizedBox(
+                    height: 300,
+                    child: Stack(
+                      children: [
+                        FlutterMap(
+                          options: MapOptions(
+                            initialCenter: s.world,
+                            initialZoom: 15,
+                          ),
+                          children: [
+                            satellite
+                                ? const SatelliteOnlineSource().buildTileLayer()
+                                : _refMap.buildActiveTileLayer(),
+                            if (provisional != null)
+                              OverlayImageLayer(
+                                overlayImages: [
+                                  OverlayImage(
+                                    bounds: LatLngBounds(
+                                      provisional.southWest,
+                                      provisional.northEast,
+                                    ),
+                                    imageProvider: FileImage(
+                                      File(widget.imagePath),
+                                    ),
+                                    opacity: overlayOpacity,
+                                  ),
+                                ],
+                              ),
+                            MarkerLayer(
+                              markers: [
+                                Marker(
+                                  point: s.world,
+                                  width: 30,
+                                  height: 30,
+                                  child: Container(
+                                    decoration: BoxDecoration(
+                                      color: Colors.purple,
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: Colors.white,
+                                        width: 2,
+                                      ),
+                                      boxShadow: const [
+                                        BoxShadow(
+                                          color: Colors.black38,
+                                          blurRadius: 4,
+                                        ),
+                                      ],
+                                    ),
+                                    child: const Icon(
+                                      Icons.auto_awesome,
+                                      color: Colors.white,
+                                      size: 15,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                        // בורר רקע: מפת-הייחוס הפעילה / לוויין
+                        Positioned(
+                          top: 8,
+                          left: 8,
+                          child: Material(
+                            elevation: 2,
+                            borderRadius: BorderRadius.circular(8),
+                            child: SegmentedButton<bool>(
+                              style: const ButtonStyle(
+                                visualDensity: VisualDensity.compact,
+                              ),
+                              segments: const [
+                                ButtonSegment(
+                                  value: false,
+                                  label: Text('מפה'),
+                                  icon: Icon(Icons.map, size: 16),
+                                ),
+                                ButtonSegment(
+                                  value: true,
+                                  label: Text('לוויין'),
+                                  icon: Icon(Icons.satellite_alt, size: 16),
+                                ),
+                              ],
+                              selected: {satellite},
+                              onSelectionChanged: (sel) =>
+                                  setDlg(() => satellite = sel.first),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // סליידר שקיפות המפה החדשה מעל הרקע
+                  if (provisional != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.opacity,
+                            size: 18,
+                            color: Colors.grey,
+                          ),
+                          const SizedBox(width: 4),
+                          const Text(
+                            'שקיפות המפה החדשה',
+                            style: TextStyle(fontSize: 12),
+                          ),
+                          Expanded(
+                            child: Slider(
+                              value: overlayOpacity,
+                              onChanged: (v) =>
+                                  setDlg(() => overlayOpacity = v),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(16, 8, 16, 0),
+                      child: Text(
+                        'שילוב-שקוף של המפה החדשה יוצג כשיש 3+ נקודות/הצעות',
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton.icon(
+                          onPressed: () {
+                            Navigator.pop(ctx);
+                            setState(() => _suggestions.removeAt(index));
+                          },
+                          icon: const Icon(Icons.close, color: Colors.red),
+                          label: const Text(
+                            'דחה',
+                            style: TextStyle(color: Colors.red),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.pop(ctx);
+                            setState(() {
+                              _points.add(
+                                _ControlPoint(pixel: s.pixel)
+                                  ..world = s.world,
+                              );
+                              _suggestions.removeAt(index);
+                              _result = null;
+                            });
+                          },
+                          icon: const Icon(Icons.check),
+                          label: const Text('אשר נקודה'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.green,
+                            foregroundColor: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
-          actions: [
-            TextButton.icon(
-              onPressed: () {
-                Navigator.pop(ctx);
-                setState(() => _suggestions.removeAt(index));
-              },
-              icon: const Icon(Icons.close, color: Colors.red),
-              label: const Text('דחה', style: TextStyle(color: Colors.red)),
-            ),
-            ElevatedButton.icon(
-              onPressed: () {
-                Navigator.pop(ctx);
-                setState(() {
-                  _points.add(_ControlPoint(pixel: s.pixel)..world = s.world);
-                  _suggestions.removeAt(index);
-                  _result = null;
-                });
-              },
-              icon: const Icon(Icons.check),
-              label: const Text('אשר נקודה'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.green,
-                foregroundColor: Colors.white,
-              ),
-            ),
-          ],
         ),
+      ),
+    );
+  }
+
+  /// תג סטטוס האימות של הצעת-עוגן (אומת / נכשל / לא בוצע).
+  Widget _verificationBadge(GeminiAnchorSuggestion s) {
+    final (color, icon, label) = switch (s.verified) {
+      true => (Colors.green, Icons.verified, 'אומת מול המפה'),
+      false => (Colors.red, Icons.gpp_bad, 'נכשל באימות'),
+      null => (Colors.grey, Icons.help_outline, 'לא אומת'),
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(label, style: TextStyle(fontSize: 11, color: color)),
+        ],
       ),
     );
   }
@@ -818,11 +1068,18 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   }
 
   /// סמני הצעות-AI סגולים על התמונה; לחיצה פותחת אישור/דחייה.
+  /// צבע המסגרת משקף את תוצאת האימות מול מפת-הייחוס: ירוק — אומת,
+  /// אדום — נכשל, לבן — לא בוצע.
   List<Widget> _buildSuggestionMarkers() {
     final scale = _displayScale;
     return _suggestions.asMap().entries.map((entry) {
       final i = entry.key;
       final s = entry.value;
+      final borderColor = switch (s.verified) {
+        true => Colors.greenAccent,
+        false => Colors.redAccent,
+        null => Colors.white,
+      };
       return Positioned(
         left: s.pixel.dx * scale - 14,
         top: s.pixel.dy * scale - 14,
@@ -836,7 +1093,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
               decoration: BoxDecoration(
                 color: Colors.purple,
                 shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 2),
+                border: Border.all(color: borderColor, width: 2),
                 boxShadow: const [
                   BoxShadow(color: Colors.black38, blurRadius: 4),
                 ],

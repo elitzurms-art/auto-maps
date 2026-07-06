@@ -5,7 +5,7 @@
 אפליקציית **Flutter** ייעודית (single-purpose) שממירה מפה משורטטת/תמונה לשכבה ג'יאורפרנסית שאפליקציית **LiveMaps** (`C:\LiveMaps`) צורכת. **Desktop-first (Windows)**, גם Android/iOS/macOS/Linux. GitHub: `elitzurms-art/auto-maps` (public). נגזר מפיצ'ר הג'יאורפרנס של `C:\navigate` (‏`world_file_parser_service.dart` הועתק as-is; `georeference_screen.dart` רוזז מ-`MapConfig`/`TopoLayerService`).
 
 ## הזרימה
-ייבוא תמונה → נעיצת נקודות **פיקסל↔עולם** מול מפת-ייחוס → חישוב **affine** (least-squares) *או* **יישור TPS** למפות לא-ישרות (מתג במסך הנעיצה; `gdal_warp_service.dart` → `ecw_warp_tps` ב-wrapper) → ייצוא. **מצב אוטומטי:** כפתור ✨ במסך הנעיצה שולח את התמונה ל-**Gemini** (`gemini_anchor_service.dart`, מפתח API ב-shared_preferences) ומקבל הצעות עוגנים — **אישור פר-נקודה** (סמנים סגולים). package: `com.elitzur.auto_maps`.
+ייבוא תמונה → נעיצת נקודות **פיקסל↔עולם** מול מפת-ייחוס → חישוב **affine** (least-squares) *או* **יישור TPS** למפות לא-ישרות (מתג במסך הנעיצה; `gdal_warp_service.dart` → `ecw_warp_tps` ב-wrapper) → ייצוא. **מצב אוטומטי:** כפתור ✨ במסך הנעיצה שולח את התמונה ל-**Gemini** (`gemini_anchor_service.dart`, מפתח API ב-shared_preferences) ומקבל הצעות עוגנים **נקודתיים** (צמתים/כיכרות/עיקולים/מבנים/נקודות-גובה/מעיינות — לא תוויות שם), ואז **שלב אימות**: לכל עוגן נשלף קטע OSM אמיתי (z16) והמודל מצביע על הנקודה בו — ההצבעה מומרת ל-lat/lon ב-web-mercator (לא זיכרון המודל). **אישור פר-נקודה** (סמנים סגולים; מסגרת ירוקה=אומת/אדומה=נכשל/לבנה=לא-אומת) בדיאלוג עם מיני-מפה (מפה/לוויין) ושילוב-שקוף של המפה החדשה (affine זמני + סליידר). package: `com.elitzur.auto_maps`.
 
 **כלל UI:** בכל מסך — SafeArea + רווח תחתון ~1.5 ס"מ (≈56lp) שכפתורים לא ייחתכו ע"י ה-gesture bar במובייל.
 
@@ -15,8 +15,8 @@
 - `<name>.livemap.json`: מפתחות פינות **`nw/ne/se/sw`**, קואורדינטות **`[lat, lon]`** (lat קודם), + `imageWidth/Height`, `transform:"affine"`, `sourceCrs`. ⚠️ **אל תשנה לפורמט אחר** — הצרכן ב-LiveMaps (`layers/sources/GeoImageOverlay.kt` + `overlay/GeoImageDrape*`) קורא בדיוק את זה. TPS ב-phase 2 ישאיר את אותו חוזה (רסטר מיושר + פינות; `transform:"tps"`).
 
 ## מפת-ייחוס (בורר מקורות — `reference_map_controller.dart`)
-`ReferenceMapSource` (מחזור-חיים `activate`/`deactivate`/`isReady`). הבורר מופיע כש-`availableSources().length > 1`. מקורות:
-- **OSM online** (ברירת מחדל).
+`ReferenceMapSource` (מחזור-חיים `activate`/`deactivate`/`isReady`). הבורר מופיע כש-`availableSources().length > 1` (כיום תמיד — OSM+לוויין). מקורות:
+- **OSM online** (ברירת מחדל) + **לוויין Esri online** (`SatelliteOnlineSource`, ‏World Imagery, סדר `{z}/{y}/{x}`).
 - **MBTiles / ECW מתיקייה** — `loadFolder()` סורק תיקייה (`reference_maps` ליד ה-exe/cwd) וכל `.mbtiles`/`.ecw` = מקור נפרד. `.ecw` רק כש-`NativeEcwService.isSupportedPlatform`.
 - **הוספה ידנית** — `addSource()` / `addEcwFile()`.
 
@@ -40,8 +40,8 @@ FFI ל-GDAL דרך `ecw_wrapper.c` המשותף (מ-navigate). `ecw_gdal_decoder
 - `lib/services/ecw/` — `native_ecw_service.dart` (facade), `ecw_gdal_decoder.dart` (FFI), `ecw_gdal_tile_provider.dart`.
 - `lib/services/livemaps_export_service.dart` — הייצוא (פרמטר `transform`: affine/tps).
 - `lib/services/gdal_warp_service.dart` — **יישור TPS** (FFI ל-`ecw_warp_tps` ב-wrapper; רץ ב-Isolate.run). ה-C: translate מצרף GCPs ל-MEM (+expand rgba לפלטה) → GDALWarp ‎-tps ל-WGS84 → CreateCopy PNG. הפלט: PNG מיושר-צפון + geotransform. ⚠️ סימבולים חדשים ב-`gdal_i.def` מחייבים ריצת `lib /def:gdal_i.def /machine:x64 /out:gdal_i.lib`.
-- `lib/services/gemini_anchor_service.dart` — **המצב האוטומטי**: מקטין ל-1600px, שולח ל-`gemini-2.5-flash` עם responseSchema, מקבל עוגנים (pixel+world+שם+ביטחון) וממפה חזרה למימדי המקור.
-- `lib/screens/georeference_screen.dart` — מסך הנעיצה: מתג TPS, כפתור ✨ AI, סמני הצעות סגולים עם אישור/דחייה פר-נקודה. מחזיר `GeoreferenceOutcome` (result+transform+warpedImagePath). `home_screen.dart` — בחירת תמונה→נעיצה→ייצוא.
+- `lib/services/gemini_anchor_service.dart` — **המצב האוטומטי**: מקטין ל-1600px, שולח ל-`gemini-2.5-flash` עם responseSchema, מקבל עוגנים (pixel+world+שם+ביטחון) וממפה חזרה למימדי המקור. ואז `_verifyAnchors`: קטע-סריקה עם צלב + קטע OSM (סטיצ'ינג אריחים, z16/640px) לכל עוגן בקריאה שנייה אחת → המודל מצביע בקטע-הייחוס → עידון קואורדינטות ב-web-mercator; `verified: true/false/null` (כשל רשת ⇒ null, לא מפיל). **לולאת השלמה:** סבב 1 מבקש עד 12; אם יש פחות מ-5 מאומתים — עד 2 סבבים נוספים עם רשימת מה-שהוצע-ונדחה ("חדשים בלבד, אזורים שטרם כוסו"), דדופ לפי מרחק פיקסלים (2%).
+- `lib/screens/georeference_screen.dart` — מסך הנעיצה: מתג TPS, כפתור ✨ AI, סמני הצעות סגולים עם אישור/דחייה פר-נקודה בדיאלוג משולב: מיני-מפה (רקע מפת-ייחוס/לוויין), OverlayImage של המפה החדשה מ-affine זמני (3+ נקודות) + סליידר שקיפות. מחזיר `GeoreferenceOutcome` (result+transform+warpedImagePath). `home_screen.dart` — בחירת תמונה→נעיצה→ייצוא.
 
 ## TODO / phases עתידיים
 - **הרצה-אמיתית** של iOS/macOS (דרך ה-CI). Android ✅ רץ על מכשיר (2026-07-06).

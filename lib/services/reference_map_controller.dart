@@ -67,6 +67,39 @@ class OsmOnlineSource implements ReferenceMapSource {
   }
 }
 
+/// מקור לוויין online (Esri World Imagery) — תצלום-אוויר לזיהוי מבנים,
+/// כיכרות ועיקולי כבישים שקשה לראות במפת קווים. שים לב לסדר {z}/{y}/{x}
+/// (קונבנציית Esri). משמש גם כרקע "לוויין" בדיאלוג אישור עוגני ה-AI.
+class SatelliteOnlineSource implements ReferenceMapSource {
+  const SatelliteOnlineSource();
+
+  @override
+  String get id => 'satellite';
+
+  @override
+  String get displayName => 'לוויין (Esri)';
+
+  @override
+  Future<void> activate() async {}
+
+  @override
+  Future<void> deactivate() async {}
+
+  @override
+  bool get isReady => true;
+
+  @override
+  Widget buildTileLayer() {
+    return TileLayer(
+      urlTemplate:
+          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      userAgentPackageName: 'com.elitzur.auto_maps',
+      maxNativeZoom: 18,
+      maxZoom: 20,
+    );
+  }
+}
+
 /// מקור ECW מקומי — עוטף [NativeEcwService] (פענוח נייטיבי דרך GDAL/ECW) ומספק
 /// שכבת אריחים ל-flutter_map. האריחים מרונדרים ב-warp על-דרישה ל-EPSG:3857, אז
 /// אין צורך בהמרת CRS נוספת בצד ה-Dart.
@@ -194,7 +227,11 @@ class MbtilesReferenceSource implements ReferenceMapSource {
 class ReferenceMapController extends ChangeNotifier {
   ReferenceMapController({List<ReferenceMapSource>? sources})
       : _sources = List<ReferenceMapSource>.from(
-          sources ?? const <ReferenceMapSource>[OsmOnlineSource()],
+          sources ??
+              const <ReferenceMapSource>[
+                OsmOnlineSource(),
+                SatelliteOnlineSource(),
+              ],
         ) {
     if (_sources.isEmpty) _sources.add(const OsmOnlineSource());
     _active = _sources.first;
