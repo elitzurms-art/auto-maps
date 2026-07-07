@@ -50,11 +50,17 @@ class AdjustVerifyScreen extends StatefulWidget {
 
 class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
   final MapController _map = MapController();
+  final GlobalKey _mapKey = GlobalKey();
   late final List<_Anchor> _anchors;
   int? _selected;
   double _opacity = 0.55;
   bool _satellite = false;
-  bool _placingOnMap = false; // מצב "הזז על המפה" — ההקשה הבאה קובעת מיקום
+
+  // צד-הגרירה של העוגן הנבחר: false=עולם(OSM), true=סריקה. הבחירה בכפתור
+  // (לא לפי פיקסל) פותרת "נקודה על נקודה" — גוררים את הצד שנבחר, לא את
+  // מה שבמקרה למעלה.
+  bool _activeSideScan = false;
+  bool _draggingHandle = false; // בזמן גרירת-הידית משביתים גרירת-מפה
 
   @override
   void initState() {
@@ -126,15 +132,84 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
     return lerp(top, bottom, v);
   }
 
-  void _onMapTap(LatLng p) {
-    if (_placingOnMap && _selected != null) {
-      setState(() {
-        _anchors[_selected!].world = p;
-        _placingOnMap = false;
-      });
+  /// היפוך [_projectScan]: עולם → פיקסל-סריקה (פתרון affine מ-4 הפינות).
+  /// world = NW + u·(NE−NW) + v·(SW−NW) → פותרים u,v ואז px=u·W, py=v·H.
+  Offset? _invProject(LatLng w, WorldFileResult prov) {
+    final c = prov.cornersWgs84;
+    final LatLng nw, ne, sw;
+    if (c != null && c.length == 4) {
+      nw = c[0];
+      ne = c[1];
+      sw = c[3];
     } else {
-      setState(() => _selected = null);
+      nw = LatLng(prov.northEast.latitude, prov.southWest.longitude);
+      ne = prov.northEast;
+      sw = prov.southWest;
     }
+    final e1x = ne.longitude - nw.longitude, e1y = ne.latitude - nw.latitude;
+    final e2x = sw.longitude - nw.longitude, e2y = sw.latitude - nw.latitude;
+    final det = e1x * e2y - e1y * e2x;
+    if (det.abs() < 1e-12) return null;
+    final dx = w.longitude - nw.longitude, dy = w.latitude - nw.latitude;
+    final u = (dx * e2y - dy * e2x) / det;
+    final v = (e1x * dy - e1y * dx) / det;
+    return Offset(
+      (u * widget.imageWidth).clamp(0.0, widget.imageWidth.toDouble()),
+      (v * widget.imageHeight).clamp(0.0, widget.imageHeight.toDouble()),
+    );
+  }
+
+  /// ממיר מיקום-מסך גלובלי ל-LatLng לפי מצלמת-המפה.
+  LatLng? _globalToLatLng(Offset global) {
+    final box = _mapKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return null;
+    final local = box.globalToLocal(global);
+    return _map.camera.offsetToCrs(local);
+  }
+
+  /// מיישם גרירה של הצד-הנבחר: מזיז את צד-העולם (world) ישירות, או את
+  /// צד-הסריקה (pixel — דרך היפוך ה-affine).
+  void _applyDrag(int i, Offset global) {
+    final ll = _globalToLatLng(global);
+    if (ll == null) return;
+    setState(() {
+      if (_activeSideScan) {
+        final prov = _provisional();
+        if (prov == null) return;
+        final px = _invProject(ll, prov);
+        if (px != null) _anchors[i].pixel = px;
+      } else {
+        _anchors[i].world = ll;
+      }
+    });
+  }
+
+  /// ידית-הגרירה הגדולה לצד-הנבחר. Listener תופס מיד את מגע-האצבע (לפני
+  /// שהמפה מספיקה) — גרירה חלקה, בלי התנגשות z-order.
+  Marker _dragHandle(int i, WorldFileResult prov) {
+    final a = _anchors[i];
+    final pos = _activeSideScan
+        ? (_projectScan(a.pixel, prov) ?? a.world)
+        : a.world;
+    final color = _activeSideScan ? Colors.blue : Colors.green;
+    return Marker(
+      point: pos,
+      width: 60,
+      height: 60,
+      child: Listener(
+        onPointerDown: (_) => setState(() => _draggingHandle = true),
+        onPointerMove: (e) => _applyDrag(i, e.position),
+        onPointerUp: (_) => setState(() => _draggingHandle = false),
+        child: Container(
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.25),
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.amber, width: 3),
+          ),
+          child: Icon(Icons.open_with, color: color, size: 26),
+        ),
+      ),
+    );
   }
 
   Future<void> _moveOnScan(int idx) async {
@@ -201,15 +276,16 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
         body: Stack(
           children: [
             FlutterMap(
+              key: _mapKey,
               mapController: _map,
               options: MapOptions(
                 initialCenter: _center,
                 initialZoom: 15,
-                onTap: (_, p) => _onMapTap(p),
+                onTap: (_, __) => setState(() => _selected = null),
                 interactionOptions: InteractionOptions(
-                  // בזמן "הזז על המפה" משביתים גרירה כדי שהקשה תיקלט נקי
-                  flags: _placingOnMap
-                      ? InteractiveFlag.none
+                  // בזמן גרירת-ידית משביתים גרירת-מפה כדי שהתנועה תזיז את הפין
+                  flags: _draggingHandle
+                      ? (InteractiveFlag.all & ~InteractiveFlag.drag)
                       : InteractiveFlag.all,
                 ),
               ),
@@ -260,30 +336,14 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                 MarkerLayer(markers: [
                   for (var i = 0; i < _anchors.length; i++) _worldMarker(i),
                 ]),
+                // שכבה 3 — ידית-גרירה גדולה לצד-הנבחר של העוגן הנבחר (תמיד
+                // למעלה; פותרת נקודה-על-נקודה).
+                if (_selected != null &&
+                    !_anchors[_selected!].rejected &&
+                    prov != null)
+                  MarkerLayer(markers: [_dragHandle(_selected!, prov)]),
               ],
             ),
-
-            // הנחיה בזמן מצב-הזזה על המפה
-            if (_placingOnMap)
-              Positioned(
-                top: 8,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.black87,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: const Text(
-                      'הקש על המיקום הנכון במפה',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                  ),
-                ),
-              ),
 
             // סרגל תחתון: שקיפות + פעולות הנקודה הנבחרת
             Positioned(
@@ -312,7 +372,7 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
       child: GestureDetector(
         onTap: () => setState(() {
           _selected = sel ? null : i;
-          _placingOnMap = false;
+          _activeSideScan = false; // בחירת עוגן → צד-ברירת-מחדל: OSM
         }),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -368,8 +428,8 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
       height: 30,
       child: GestureDetector(
         onTap: () => setState(() {
-          _selected = sel ? null : i;
-          _placingOnMap = false;
+          _selected = i;
+          _activeSideScan = true; // הקשה על סמן-הסריקה → צד-סריקה פעיל
         }),
         child: Container(
           decoration: BoxDecoration(
@@ -477,6 +537,34 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
           '${a.kind == AnchorVerifyKind.geometric ? ' · אומת גיאומטרית' : a.kind == AnchorVerifyKind.vision ? ' · אומת ראייה' : ''}',
           style: const TextStyle(color: Colors.white, fontSize: 13),
         ),
+        if (!a.rejected) ...[
+          const SizedBox(height: 6),
+          // בחירת צד-הגרירה (פותר נקודה-על-נקודה): גוררים את הצד שנבחר.
+          SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment(
+                value: false,
+                icon: Icon(Icons.circle, size: 14, color: Colors.green),
+                label: Text('OSM'),
+              ),
+              ButtonSegment(
+                value: true,
+                icon: Icon(Icons.circle_outlined, size: 14, color: Colors.blue),
+                label: Text('סריקה'),
+              ),
+            ],
+            selected: {_activeSideScan},
+            onSelectionChanged: (s) =>
+                setState(() => _activeSideScan = s.first),
+            showSelectedIcon: false,
+            style: const ButtonStyle(visualDensity: VisualDensity.compact),
+          ),
+          const SizedBox(height: 2),
+          const Text(
+            'גרור את הידית הצהובה ⤡ להזזת הצד שנבחר',
+            style: TextStyle(color: Colors.white70, fontSize: 12),
+          ),
+        ],
         const SizedBox(height: 6),
         Wrap(
           spacing: 8,
@@ -495,30 +583,18 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                   backgroundColor: Colors.red[100],
                   foregroundColor: Colors.red[900],
                 ),
-                onPressed: () => setState(() {
-                  a.rejected = true;
-                  _placingOnMap = false;
-                }),
+                onPressed: () => setState(() => a.rejected = true),
                 icon: const Icon(Icons.close),
                 label: const Text('פסול'),
               ),
-            FilledButton.tonalIcon(
-              onPressed: a.rejected
-                  ? null
-                  : () => setState(() => _placingOnMap = true),
-              icon: const Icon(Icons.place),
-              label: const Text('הזז על המפה'),
-            ),
+            // עריכת צד-הסריקה בזום מדויק (חלופה לגרירה על המפה).
             FilledButton.tonalIcon(
               onPressed: a.rejected ? null : () => _moveOnScan(sel),
               icon: const Icon(Icons.crop),
-              label: const Text('הזז על הסריקה'),
+              label: const Text('סריקה בזום'),
             ),
             TextButton(
-              onPressed: () => setState(() {
-                _selected = null;
-                _placingOnMap = false;
-              }),
+              onPressed: () => setState(() => _selected = null),
               child: const Text('סגור', style: TextStyle(color: Colors.white)),
             ),
           ],
