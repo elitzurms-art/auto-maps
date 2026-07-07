@@ -125,11 +125,11 @@ class GeminiAnchorService {
   static const _verifyZoom = 16;
   static const _verifyCropSize = 640;
 
-  /// ⚠️ מסלול ההתאמה הקלאסי (Overpass+RANSAC) מושבת: רישום-נקודות-בלבד
-  /// אמביגואי על עיר-רשת — נועל לעיתים על פתרון הפוך (~180°) שמתאים
-  /// לענן-הנקודות אך לא לכבישים (אומת ב-tool/match_verify עם שיטוח-על).
-  /// דורש שער-אימות (חפיפת-כבישים) או אילוץ-טופולוגיה לפני הפעלה מחדש.
-  static bool classicalMatchEnabled = false;
+  /// מסלול ההתאמה הקלאסי (Overpass+RANSAC) — פעיל עם שער-אימות של
+  /// חפיפת-כבישים: כשהרישום לא ודאי (מפה סכמטית/משורטטת שסוטה מ-OSM)
+  /// השער דוחה והצנרת נופלת ל-AI; על מפות נאמנות-גיאומטרית הוא מנצח
+  /// (שניות, בלי מכסה). ראו tool/match_verify לאבחון.
+  static bool classicalMatchEnabled = true;
 
   /// יעד העוגנים המאומתים: מינימום המסך (4) + רזרבה לדחייה ידנית של המשתמש.
   static const _targetVerified = 5;

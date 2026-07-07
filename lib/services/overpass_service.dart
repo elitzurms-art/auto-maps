@@ -193,6 +193,45 @@ class OverpassService {
     return OverpassService._(junctions, neighbors, isRoundabout, roadPoints);
   }
 
+  /// מרכז השטחים הירוקים ב-[bbox] (landuse/leisure) — "מצפן" אסימטרי
+  /// לשבירת אמביגואיית-הסיבוב: ההשערה הנכונה ממפה את הכתם-הירוק שבסריקה
+  /// אל הירוק האמיתי. null כשאין ירוק מספק.
+  static Future<LatLng?> fetchGreenCentroid(GeoBbox bbox) async {
+    final query =
+        '[out:json][timeout:45];('
+        'way["landuse"~"^(grass|meadow|recreation_ground|farmland|orchard|'
+        'vineyard|forest|village_green)\$"]'
+        '(${bbox.south},${bbox.west},${bbox.north},${bbox.east});'
+        'way["leisure"~"^(park|pitch|garden|playground|sports_centre)\$"]'
+        '(${bbox.south},${bbox.west},${bbox.north},${bbox.east});'
+        ');out geom;';
+    final body = await _post(query);
+    final elements =
+        (jsonDecode(body)['elements'] as List).cast<Map<String, dynamic>>();
+    // צנטרואיד משוקלל-שטח (שטח מקורב לפי נוסחת-שרוך על geom).
+    var sumLat = 0.0, sumLon = 0.0, sumW = 0.0;
+    for (final w in elements) {
+      final geom = (w['geometry'] as List?)?.cast<Map<String, dynamic>>();
+      if (geom == null || geom.length < 3) continue;
+      var area = 0.0, cLat = 0.0, cLon = 0.0;
+      for (var i = 0; i < geom.length; i++) {
+        final a = geom[i], b = geom[(i + 1) % geom.length];
+        final cross = (a['lon'] as num).toDouble() * (b['lat'] as num) -
+            (b['lon'] as num).toDouble() * (a['lat'] as num);
+        area += cross.toDouble();
+        cLat += (a['lat'] as num).toDouble();
+        cLon += (a['lon'] as num).toDouble();
+      }
+      final wgt = area.abs();
+      if (wgt < 1e-12) continue;
+      sumLat += (cLat / geom.length) * wgt;
+      sumLon += (cLon / geom.length) * wgt;
+      sumW += wgt;
+    }
+    if (sumW < 1e-12) return null;
+    return LatLng(sumLat / sumW, sumLon / sumW);
+  }
+
   static Future<String> _post(String query) async {
     // קידוד מפורש של גוף-הטופס (כמו --data-urlencode של curl) — שליחת Map
     // ל-http.post גרמה לבקשה ש-Overpass "תקע" עליה עד timeout.

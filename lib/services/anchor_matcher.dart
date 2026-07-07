@@ -25,6 +25,42 @@ class MatchResult {
   );
 }
 
+/// השערת-רישום אחת (אשכול-זווית מתוך מועמדי-ה-RANSAC): הטרנספורמציה
+/// (פרימיטיבים ברי-שליחה בין isolates) + מדדי-איכות. הבחירה ביניהן נעשית
+/// ע"י שוברי-שוויון אסימטריים (ירוק/יציאות/AI) — לא ע"י המדדים לבדם,
+/// שסימטריים על עיר-רשת.
+class MatchHypothesis {
+  final double aRe, aIm, bRe, bIm; // w = a·z + b (מרוכבים)
+  final double lat0, lon0; // מרכז מערכת-המטרים המקומית
+  final double scaleMetersPerPx;
+  final double rotationDeg;
+  final int inliers;
+  final double roadFitMeters;
+  const MatchHypothesis({
+    required this.aRe,
+    required this.aIm,
+    required this.bRe,
+    required this.bIm,
+    required this.lat0,
+    required this.lon0,
+    required this.scaleMetersPerPx,
+    required this.rotationDeg,
+    required this.inliers,
+    required this.roadFitMeters,
+  });
+
+  /// ממפה פיקסל-סריקה ל-WGS84 לפי ההשערה.
+  LatLng project(Point<double> px) {
+    // z=(x,-y) — אותו היפוך-ציר כמו במַתאם.
+    final wx = aRe * px.x - aIm * (-px.y) + bRe;
+    final wy = aIm * px.x + aRe * (-px.y) + bIm;
+    return LatLng(
+      lat0 + wy / 111320.0,
+      lon0 + wx / (111320.0 * cos(lat0 * pi / 180)),
+    );
+  }
+}
+
 /// רישום גיאומטרי (RANSAC) בין צמתי-הסריקה (פיקסלים, טרנספורמציה
 /// לא-ידועה) לצמתי-הייחוס (WGS84 מדויק מ-OSM). מוצא טרנספורמציית-דמיון
 /// (סיבוב+קנה-מידה+הזזה) שממקסמת inliers — עמיד לסיבוב, לקנה-מידה
@@ -90,7 +126,9 @@ class AnchorMatcher {
       for (final g in refGeo)
         _C((g.longitude - lon0) * mPerLon, (g.latitude - lat0) * mPerLat),
     ];
-    final scan = [for (final p in scanPx) _C(p.x, p.y)];
+    // y-מסך מצביע למטה, y-מטרים (צפון) למעלה — היפוך חד-פעמי, אחרת
+    // הדמיון w=az+b נאלץ להתאים תמונת-ראי (שורש כל הזוויות השגויות).
+    final scan = [for (final p in scanPx) _C(p.x, -p.y)];
 
     // קנה-מידה צפוי = מוטת-הייחוס(מ') / מוטת-הסריקה(px). מגביל את מרחב
     // ההשערות ומונע קריסה לפתרון-שווא זעיר.
@@ -127,9 +165,10 @@ class AnchorMatcher {
       if (k == i) continue;
       final dzLen = (scan[i] - scan[k]).abs;
       if (dzLen < scanSpan * 0.15) continue; // זוג קצר מדי — לא יציב
-      final target = dzLen * expScale;
-      final lo = _lowerBound(refLens, target * 0.7);
-      final hi = _lowerBound(refLens, target * 1.3);
+      // חלון-דגימה = בדיוק גבולות-הסקאלה המותרים — עקבי, בלי הטיה כפולה
+      // (חלון צר סביב המשוער פספס את הסקאלה הנכונה כשהמשוער מוטה).
+      final lo = _lowerBound(refLens, dzLen * minScale);
+      final hi = _lowerBound(refLens, dzLen * maxScale);
       if (hi <= lo) continue;
       final rp = refPairs[lo + rng.nextInt(hi - lo)];
       final (j, l) = rng.nextBool() ? (rp.$2, rp.$3) : (rp.$3, rp.$2);
@@ -164,7 +203,7 @@ class AnchorMatcher {
 
     // נקודות-כביש למטרים (אם ניתנו) — לדירוג חפיפת-כבישים.
     final scanRoadC =
-        scanRoad == null ? null : [for (final p in scanRoad) _C(p.x, p.y)];
+        scanRoad == null ? null : [for (final p in scanRoad) _C(p.x, -p.y)];
     final refRoadC = refRoad == null
         ? null
         : [
@@ -216,8 +255,53 @@ class AnchorMatcher {
     // עדיף להחזיר null (נפילה-חזרה ל-AI) מלהציג עוגנים בזווית הפוכה.
     if (useRoad && bestRoadMean > roadGateMeters) return null;
 
-    final a = bestA, b = bestB!;
-    // התאמות סופיות 1-1 (חמדני לפי מרחק), עם snap לקואורדינטת-OSM המדויקת.
+    return buildResult(
+      scanPx: scanPx,
+      refGeo: refGeo,
+      scanRound: scanRound,
+      refRound: refRound,
+      aRe: bestA.re,
+      aIm: bestA.im,
+      bRe: bestB!.re,
+      bIm: bestB.im,
+      minInliers: minInliers,
+      inlierMeters: inlierMeters,
+    );
+  }
+
+  /// בונה [MatchResult] (התאמות 1-1 + snap ל-OSM) מטרנספורמציה נתונה —
+  /// למשל השערה שנבחרה ע"י שובר-שוויון.
+  static MatchResult? buildResult({
+    required List<Point<double>> scanPx,
+    required List<LatLng> refGeo,
+    List<bool>? scanRound,
+    List<bool>? refRound,
+    required double aRe,
+    required double aIm,
+    required double bRe,
+    required double bIm,
+    int minInliers = 4,
+    double inlierMeters = 45,
+  }) {
+    var lat0 = 0.0, lon0 = 0.0;
+    for (final g in refGeo) {
+      lat0 += g.latitude;
+      lon0 += g.longitude;
+    }
+    lat0 /= refGeo.length;
+    lon0 /= refGeo.length;
+    final mPerLat = 111320.0;
+    final mPerLon = 111320.0 * cos(lat0 * pi / 180);
+    final ref = [
+      for (final g in refGeo)
+        _C((g.longitude - lon0) * mPerLon, (g.latitude - lat0) * mPerLat),
+    ];
+    // y-מסך מצביע למטה, y-מטרים (צפון) למעלה — היפוך חד-פעמי, אחרת
+    // הדמיון w=az+b נאלץ להתאים תמונת-ראי (שורש כל הזוויות השגויות).
+    final scan = [for (final p in scanPx) _C(p.x, -p.y)];
+    final a = _C(aRe, aIm), b = _C(bRe, bIm);
+    final thr2 = inlierMeters * inlierMeters;
+
     final pairs = _correspondences(scan, ref, a, b, thr2, scanRound, refRound);
     final matches = [
       for (final p in pairs)
@@ -231,6 +315,452 @@ class AnchorMatcher {
 
     final rotDeg = atan2(a.im, a.re) * 180 / pi;
     return MatchResult(matches, a.abs, rotDeg, matches.length);
+  }
+
+  /// מחזיר את אשכולות-ההשערות המובילים (עד [maxHypotheses], מובחנים
+  /// בזווית ≥20°), כל אחד אחרי עידון-ICP ועם ציון חפיפת-כבישים. הבחירה
+  /// ביניהם — בשוברי-השוויון האסימטריים של הקורא.
+  static Future<List<MatchHypothesis>> hypothesesInIsolate({
+    required List<Point<double>> scanPx,
+    required List<LatLng> refGeo,
+    List<Point<double>>? scanRoad,
+    List<LatLng>? refRoad,
+    int maxHypotheses = 4,
+  }) {
+    return Isolate.run(() => hypotheses(
+          scanPx: scanPx,
+          refGeo: refGeo,
+          scanRoad: scanRoad,
+          refRoad: refRoad,
+          maxHypotheses: maxHypotheses,
+        ));
+  }
+
+  static List<MatchHypothesis> hypotheses({
+    required List<Point<double>> scanPx,
+    required List<LatLng> refGeo,
+    List<Point<double>>? scanRoad,
+    List<LatLng>? refRoad,
+    int maxHypotheses = 4,
+    int minInliers = 4,
+    double inlierMeters = 45,
+    int iterations = 50000,
+    int seed = 12345,
+  }) {
+    if (scanPx.length < minInliers || refGeo.length < minInliers) {
+      return const [];
+    }
+    var lat0 = 0.0, lon0 = 0.0;
+    for (final g in refGeo) {
+      lat0 += g.latitude;
+      lon0 += g.longitude;
+    }
+    lat0 /= refGeo.length;
+    lon0 /= refGeo.length;
+    final mPerLat = 111320.0;
+    final mPerLon = 111320.0 * cos(lat0 * pi / 180);
+    final ref = [
+      for (final g in refGeo)
+        _C((g.longitude - lon0) * mPerLon, (g.latitude - lat0) * mPerLat),
+    ];
+    // y-מסך מצביע למטה, y-מטרים (צפון) למעלה — היפוך חד-פעמי, אחרת
+    // הדמיון w=az+b נאלץ להתאים תמונת-ראי (שורש כל הזוויות השגויות).
+    final scan = [for (final p in scanPx) _C(p.x, -p.y)];
+
+    final scanSpan = _span(scan);
+    final refSpan = _span(ref);
+    if (scanSpan < 1 || refSpan < 1) return const [];
+    final expScale = refSpan / scanSpan;
+    final minScale = expScale * 0.35, maxScale = expScale * 2.8;
+
+    final refPairs = <(double, int, int)>[];
+    for (var a = 0; a < ref.length; a++) {
+      for (var b = a + 1; b < ref.length; b++) {
+        refPairs.add(((ref[a] - ref[b]).abs, a, b));
+      }
+    }
+    refPairs.sort((x, y) => x.$1.compareTo(y.$1));
+    final refLens = [for (final p in refPairs) p.$1];
+
+    final rng = Random(seed);
+    // סף-inlier ב**פיקסלי-סריקה** (שם מקור השגיאה — יד רועדת), מומר
+    // למטרים לפי קנה-המידה של כל השערה. סף קבוע-במטרים נותן לפתרונות
+    // בקנה-מידה קטן "דיוק בחינם" (שגיאות-הפיקסלים מתכווצות) — והקריסה
+    // תמיד ניצחה. 1.5% ממוטת-הסריקה ≈ 70px על מפה 5000px.
+    final thrPx = scanSpan * 0.015;
+    const kCand = 40;
+    final cands = <(int, _C, _C)>[];
+    var minCandInliers = 0;
+
+    for (var iter = 0; iter < iterations; iter++) {
+      final i = rng.nextInt(scan.length);
+      final k = rng.nextInt(scan.length);
+      if (k == i) continue;
+      final dzLen = (scan[i] - scan[k]).abs;
+      if (dzLen < scanSpan * 0.15) continue;
+      // חלון-דגימה = בדיוק גבולות-הסקאלה המותרים — עקבי, בלי הטיה כפולה
+      // (חלון צר סביב המשוער פספס את הסקאלה הנכונה כשהמשוער מוטה).
+      final lo = _lowerBound(refLens, dzLen * minScale);
+      final hi = _lowerBound(refLens, dzLen * maxScale);
+      if (hi <= lo) continue;
+      final rp = refPairs[lo + rng.nextInt(hi - lo)];
+      final (j, l) = rng.nextBool() ? (rp.$2, rp.$3) : (rp.$3, rp.$2);
+      final dz = scan[i] - scan[k];
+      final dw = ref[j] - ref[l];
+      final a = dw / dz;
+      if (a.abs < minScale || a.abs > maxScale) continue;
+      final b = ref[j] - a * scan[i];
+
+      final thr2 = pow(thrPx * a.abs, 2).toDouble();
+      var inliers = 0;
+      for (final z in scan) {
+        final w = a * z + b;
+        var best = double.infinity;
+        for (final r in ref) {
+          final d2 = (w - r).abs2;
+          if (d2 < best) best = d2;
+        }
+        if (best <= thr2) inliers++;
+      }
+      if (inliers >= minInliers &&
+          (cands.length < kCand || inliers > minCandInliers)) {
+        cands.add((inliers, a, b));
+        cands.sort((x, y) => y.$1.compareTo(x.$1));
+        if (cands.length > kCand) cands.removeLast();
+        minCandInliers = cands.last.$1;
+      }
+    }
+    if (cands.isEmpty) return const [];
+
+    final scanRoadC =
+        scanRoad == null ? null : [for (final p in scanRoad) _C(p.x, -p.y)];
+    final refRoadC = refRoad == null
+        ? null
+        : [
+            for (final g in refRoad)
+              _C((g.longitude - lon0) * mPerLon, (g.latitude - lat0) * mPerLat),
+          ];
+    final useRoad = scanRoadC != null &&
+        refRoadC != null &&
+        scanRoadC.length >= 10 &&
+        refRoadC.length >= 10;
+
+    // עידון כל מועמד + אשכול לפי זווית: שומרים את הטוב (inliers) מכל אשכול.
+    final out = <MatchHypothesis>[];
+    for (final cand in cands) {
+      var a = cand.$2, b = cand.$3;
+      for (var round = 0; round < 3; round++) {
+        final thr2c = pow(thrPx * a.abs, 2).toDouble();
+        final ps = _correspondences(scan, ref, a, b, thr2c, null, null);
+        if (ps.length < minInliers) break;
+        final fit = _fitSimilarity(
+          [for (final p in ps) scan[p.$1]],
+          [for (final p in ps) ref[p.$2]],
+        );
+        a = fit.$1;
+        b = fit.$2;
+      }
+      final rot = atan2(a.im, a.re) * 180 / pi;
+      // אשכול-זווית קיים? (הפרש מעגלי < 20°)
+      final dup = out.any((h) {
+        var d = (h.rotationDeg - rot).abs() % 360;
+        if (d > 180) d = 360 - d;
+        return d < 20;
+      });
+      if (dup) continue;
+      final thr2f = pow(thrPx * a.abs, 2).toDouble();
+      final ps = _correspondences(scan, ref, a, b, thr2f, null, null);
+      if (ps.length < minInliers) continue;
+      out.add(MatchHypothesis(
+        aRe: a.re,
+        aIm: a.im,
+        bRe: b.re,
+        bIm: b.im,
+        lat0: lat0,
+        lon0: lon0,
+        scaleMetersPerPx: a.abs,
+        rotationDeg: rot,
+        inliers: ps.length,
+        roadFitMeters:
+            useRoad ? _roadFit(scanRoadC, refRoadC, a, b) : double.nan,
+      ));
+      if (out.length >= maxHypotheses) break;
+    }
+    return out;
+  }
+
+  /// חיפוש-מכוון-משואה: כשיש "משואה" אסימטרית מותאמת-מראש בשני הצדדים
+  /// (מרכז הכתם-הירוק בסריקה ↔ מרכז הירוק ב-OSM), כל צירוף של
+  /// (צומת-סריקה, צומת-ייחוס) + המשואה נותן טרנספורמציה מלאה — סריקה
+  /// **דטרמיניסטית** של כל הצירופים (~1-2K), בלי הגרלות ובלי סימטריה:
+  /// המשואה שוברת את הכיוון מהבנייה. מחזיר השערות מובחנות-זווית ממוינות
+  /// לפי inliers.
+  static Future<List<MatchHypothesis>> hypothesesWithBeaconInIsolate({
+    required List<Point<double>> scanPx,
+    required List<LatLng> refGeo,
+    required Point<double> scanBeacon,
+    required LatLng refBeacon,
+    List<Point<double>>? scanRoad,
+    List<LatLng>? refRoad,
+    int maxHypotheses = 4,
+  }) {
+    return Isolate.run(() => hypothesesWithBeacon(
+          scanPx: scanPx,
+          refGeo: refGeo,
+          scanBeacon: scanBeacon,
+          refBeacon: refBeacon,
+          scanRoad: scanRoad,
+          refRoad: refRoad,
+          maxHypotheses: maxHypotheses,
+        ));
+  }
+
+  static List<MatchHypothesis> hypothesesWithBeacon({
+    required List<Point<double>> scanPx,
+    required List<LatLng> refGeo,
+    required Point<double> scanBeacon,
+    required LatLng refBeacon,
+    List<Point<double>>? scanRoad,
+    List<LatLng>? refRoad,
+    int maxHypotheses = 4,
+    int minInliers = 4,
+  }) {
+    if (scanPx.length < minInliers || refGeo.length < minInliers) {
+      return const [];
+    }
+    var lat0 = 0.0, lon0 = 0.0;
+    for (final g in refGeo) {
+      lat0 += g.latitude;
+      lon0 += g.longitude;
+    }
+    lat0 /= refGeo.length;
+    lon0 /= refGeo.length;
+    final mPerLat = 111320.0;
+    final mPerLon = 111320.0 * cos(lat0 * pi / 180);
+    final ref = [
+      for (final g in refGeo)
+        _C((g.longitude - lon0) * mPerLon, (g.latitude - lat0) * mPerLat),
+    ];
+    // y-מסך מצביע למטה, y-מטרים (צפון) למעלה — היפוך חד-פעמי, אחרת
+    // הדמיון w=az+b נאלץ להתאים תמונת-ראי (שורש כל הזוויות השגויות).
+    final scan = [for (final p in scanPx) _C(p.x, -p.y)];
+    final sBeacon = _C(scanBeacon.x, -scanBeacon.y);
+    final rBeacon = _C(
+      (refBeacon.longitude - lon0) * mPerLon,
+      (refBeacon.latitude - lat0) * mPerLat,
+    );
+
+    final scanSpan = _span(scan);
+    final refSpan = _span(ref);
+    if (scanSpan < 1 || refSpan < 1) return const [];
+    final expScale = refSpan / scanSpan;
+    final minScale = expScale * 0.3, maxScale = expScale * 3.2;
+    final thrPx = scanSpan * 0.015;
+
+    final scanRoadC =
+        scanRoad == null ? null : [for (final p in scanRoad) _C(p.x, -p.y)];
+    final refRoadC = refRoad == null
+        ? null
+        : [
+            for (final g in refRoad)
+              _C((g.longitude - lon0) * mPerLon, (g.latitude - lat0) * mPerLat),
+          ];
+    final useRoad = scanRoadC != null &&
+        refRoadC != null &&
+        scanRoadC.length >= 10 &&
+        refRoadC.length >= 10;
+
+    // סריקה ממצה של כל הצירופים (משואה + צומת אחד = טרנספורמציה).
+    final seeds = <(int, _C, _C)>[];
+    for (final s in scan) {
+      final dz = s - sBeacon;
+      if (dz.abs < scanSpan * 0.12) continue; // קרוב מדי למשואה — לא יציב
+      for (final r in ref) {
+        final dw = r - rBeacon;
+        final a = dw / dz;
+        if (a.abs < minScale || a.abs > maxScale) continue;
+        final b = rBeacon - a * sBeacon;
+        final thr2 = pow(thrPx * a.abs, 2).toDouble();
+        var inliers = 0;
+        for (final z in scan) {
+          final w = a * z + b;
+          var best = double.infinity;
+          for (final rr in ref) {
+            final d2 = (w - rr).abs2;
+            if (d2 < best) best = d2;
+          }
+          if (best <= thr2) inliers++;
+        }
+        if (inliers >= minInliers) seeds.add((inliers, a, b));
+      }
+    }
+    if (seeds.isEmpty) return const [];
+    seeds.sort((x, y) => y.$1.compareTo(x.$1));
+
+    // עידון ICP + אשכול-זווית (כמו ב-hypotheses).
+    final out = <MatchHypothesis>[];
+    for (final seed in seeds) {
+      var a = seed.$2, b = seed.$3;
+      for (var round = 0; round < 3; round++) {
+        final thr2c = pow(thrPx * a.abs, 2).toDouble();
+        final ps = _correspondences(scan, ref, a, b, thr2c, null, null);
+        if (ps.length < minInliers) break;
+        final fit = _fitSimilarity(
+          [for (final p in ps) scan[p.$1]],
+          [for (final p in ps) ref[p.$2]],
+        );
+        a = fit.$1;
+        b = fit.$2;
+      }
+      final rot = atan2(a.im, a.re) * 180 / pi;
+      final dup = out.any((h) {
+        var d = (h.rotationDeg - rot).abs() % 360;
+        if (d > 180) d = 360 - d;
+        return d < 20;
+      });
+      if (dup) continue;
+      // המשואה חייבת להישאר נאמנה גם אחרי העידון — אחרת ההשערה זנחה
+      // את העוגן ששבר את הסימטריה.
+      final beaconErr = (a * sBeacon + b - rBeacon).abs;
+      if (beaconErr > refSpan * 0.25) continue;
+      final thr2f = pow(thrPx * a.abs, 2).toDouble();
+      final ps = _correspondences(scan, ref, a, b, thr2f, null, null);
+      if (ps.length < minInliers) continue;
+      out.add(MatchHypothesis(
+        aRe: a.re,
+        aIm: a.im,
+        bRe: b.re,
+        bIm: b.im,
+        lat0: lat0,
+        lon0: lon0,
+        scaleMetersPerPx: a.abs,
+        rotationDeg: rot,
+        inliers: ps.length,
+        roadFitMeters:
+            useRoad ? _roadFit(scanRoadC, refRoadC, a, b) : double.nan,
+      ));
+      if (out.length >= maxHypotheses) break;
+    }
+    return out;
+  }
+
+  /// שתי-משואות: זוג התאמות ידועות-סמנטית (למשל ירוק↔ירוק + כיכר↔כיכר)
+  /// נותן טרנספורמציה **דטרמיניסטית** — בלי שום ניחוש-פיוס. עבור כל צירוף
+  /// משואה-B (כיכרות: יתכנו כמה בכל צד) נבנית השערה, מעודנת ב-ICP,
+  /// ומדורגת לפי inliers. הסימטריה שבורה מהבנייה בשתי נקודות אמת.
+  static List<MatchHypothesis> twoBeaconHypotheses({
+    required List<Point<double>> scanPx,
+    required List<LatLng> refGeo,
+    required Point<double> scanBeaconA,
+    required LatLng refBeaconA,
+    required List<Point<double>> scanBeaconsB,
+    required List<LatLng> refBeaconsB,
+    List<Point<double>>? scanRoad,
+    List<LatLng>? refRoad,
+    int maxHypotheses = 4,
+    int minInliers = 4,
+  }) {
+    if (scanPx.isEmpty || refGeo.isEmpty) return const [];
+    var lat0 = 0.0, lon0 = 0.0;
+    for (final g in refGeo) {
+      lat0 += g.latitude;
+      lon0 += g.longitude;
+    }
+    lat0 /= refGeo.length;
+    lon0 /= refGeo.length;
+    final mPerLat = 111320.0;
+    final mPerLon = 111320.0 * cos(lat0 * pi / 180);
+    _C toM(LatLng g) =>
+        _C((g.longitude - lon0) * mPerLon, (g.latitude - lat0) * mPerLat);
+    final ref = [for (final g in refGeo) toM(g)];
+    // y-מסך מצביע למטה, y-מטרים (צפון) למעלה — היפוך חד-פעמי, אחרת
+    // הדמיון w=az+b נאלץ להתאים תמונת-ראי (שורש כל הזוויות השגויות).
+    final scan = [for (final p in scanPx) _C(p.x, -p.y)];
+    final gS = _C(scanBeaconA.x, -scanBeaconA.y);
+    final gR = toM(refBeaconA);
+
+    final scanSpan = _span(scan);
+    final refSpan = _span(ref);
+    if (scanSpan < 1 || refSpan < 1) return const [];
+    final expScale = refSpan / scanSpan;
+    final thrPx = scanSpan * 0.015;
+
+    final scanRoadC =
+        scanRoad == null ? null : [for (final p in scanRoad) _C(p.x, -p.y)];
+    final refRoadC =
+        refRoad == null ? null : [for (final g in refRoad) toM(g)];
+    final useRoad = scanRoadC != null &&
+        refRoadC != null &&
+        scanRoadC.length >= 10 &&
+        refRoadC.length >= 10;
+
+    final out = <MatchHypothesis>[];
+    final seeds = <(int, _C, _C)>[];
+    for (final bS in scanBeaconsB) {
+      final zB = _C(bS.x, -bS.y);
+      final dz = zB - gS;
+      if (dz.abs < scanSpan * 0.08) continue;
+      for (final bR in refBeaconsB) {
+        final dw = toM(bR) - gR;
+        final a = dw / dz;
+        if (a.abs < expScale * 0.3 || a.abs > expScale * 3.2) continue;
+        final b = gR - a * gS;
+        final thr2 = pow(thrPx * a.abs, 2).toDouble();
+        var inliers = 0;
+        for (final z in scan) {
+          final w = a * z + b;
+          var best = double.infinity;
+          for (final rr in ref) {
+            final d2 = (w - rr).abs2;
+            if (d2 < best) best = d2;
+          }
+          if (best <= thr2) inliers++;
+        }
+        seeds.add((inliers, a, b));
+      }
+    }
+    if (seeds.isEmpty) return const [];
+    seeds.sort((x, y) => y.$1.compareTo(x.$1));
+
+    for (final seed in seeds) {
+      var a = seed.$2, b = seed.$3;
+      for (var round = 0; round < 3; round++) {
+        final thr2c = pow(thrPx * a.abs, 2).toDouble();
+        final ps = _correspondences(scan, ref, a, b, thr2c, null, null);
+        if (ps.length < minInliers) break;
+        final fit = _fitSimilarity(
+          [for (final p in ps) scan[p.$1]],
+          [for (final p in ps) ref[p.$2]],
+        );
+        a = fit.$1;
+        b = fit.$2;
+      }
+      final rot = atan2(a.im, a.re) * 180 / pi;
+      final dup = out.any((h) {
+        var d = (h.rotationDeg - rot).abs() % 360;
+        if (d > 180) d = 360 - d;
+        return d < 20;
+      });
+      if (dup) continue;
+      final thr2f = pow(thrPx * a.abs, 2).toDouble();
+      final ps = _correspondences(scan, ref, a, b, thr2f, null, null);
+      if (ps.length < minInliers) continue;
+      out.add(MatchHypothesis(
+        aRe: a.re,
+        aIm: a.im,
+        bRe: b.re,
+        bIm: b.im,
+        lat0: lat0,
+        lon0: lon0,
+        scaleMetersPerPx: a.abs,
+        rotationDeg: rot,
+        inliers: ps.length,
+        roadFitMeters:
+            useRoad ? _roadFit(scanRoadC, refRoadC, a, b) : double.nan,
+      ));
+      if (out.length >= maxHypotheses) break;
+    }
+    return out;
   }
 
   /// התאמות 1-1: לכל צומת-סריקה הצומת-ייחוס הקרוב ביותר תחת הסף, בסדר

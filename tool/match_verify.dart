@@ -39,7 +39,68 @@ Future<void> main(List<String> args) async {
     }
   }
   final osm = await OverpassService.fetchJunctions(bbox);
-  final res = AnchorMatcher.match(
+
+  // משואה ירוקה: מרכז הכתם-הירוק בסריקה ↔ מרכז הירוק ב-OSM.
+  var gx = 0.0, gy = 0.0, gn = 0;
+  for (var y = 0; y < im.height; y += 4) {
+    for (var x = 0; x < im.width; x += 4) {
+      final p = im.getPixel(x, y);
+      if (p.g > p.r + 20 && p.g > p.b + 20 && p.g > 120) {
+        gx += x.toDouble();
+        gy += y.toDouble();
+        gn++;
+      }
+    }
+  }
+  final scanGreen =
+      gn > (im.width / 4) * (im.height / 4) * 0.01 ? Point(gx / gn, gy / gn) : null;
+  LatLng? refGreen;
+  try {
+    refGreen = await OverpassService.fetchGreenCentroid(bbox);
+  } catch (_) {}
+
+  // שתי משואות: ירוק↔ירוק + כיכר↔כיכר = טרנספורמציה דטרמיניסטית.
+  final scanRoundPts = [
+    for (final f in det.features)
+      if (f.kind == MapFeatureKind.roundabout) f.pos,
+  ];
+  final refRoundPts = <LatLng>[
+    for (var i = 0; i < osm.junctions.length; i++)
+      if (osm.isRoundabout[i]) osm.junctions[i],
+  ];
+  print('scan roundabouts: ${scanRoundPts.length}, OSM roundabouts: ${refRoundPts.length}');
+
+  MatchResult? res;
+  if (scanGreen != null && refGreen != null && scanRoundPts.isNotEmpty && refRoundPts.isNotEmpty) {
+    final hyps = AnchorMatcher.twoBeaconHypotheses(
+      scanPx: scan,
+      refGeo: osm.junctions,
+      scanBeaconA: scanGreen,
+      refBeaconA: refGreen,
+      scanBeaconsB: scanRoundPts,
+      refBeaconsB: refRoundPts,
+      scanRoad: det.roadPoints,
+      refRoad: osm.roadPoints,
+    );
+    print('2-beacon hypotheses: ${[
+      for (final h in hyps)
+        'rot=${h.rotationDeg.toStringAsFixed(1)} scale=${h.scaleMetersPerPx.toStringAsFixed(3)} inl=${h.inliers} road=${h.roadFitMeters.toStringAsFixed(1)}'
+    ].join(" | ")}');
+    if (hyps.isNotEmpty) {
+      final h = hyps.first;
+      res = AnchorMatcher.buildResult(
+        scanPx: scan,
+        refGeo: osm.junctions,
+        scanRound: scanRound,
+        refRound: osm.isRoundabout,
+        aRe: h.aRe,
+        aIm: h.aIm,
+        bRe: h.bRe,
+        bIm: h.bIm,
+      );
+    }
+  }
+  res ??= AnchorMatcher.match(
     scanPx: scan,
     refGeo: osm.junctions,
     scanRound: scanRound,
