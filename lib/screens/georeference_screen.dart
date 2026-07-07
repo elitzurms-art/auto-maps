@@ -258,19 +258,25 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
 
   Future<void> _runAiSuggest() async {
     if (_aiBusy) return;
-    // מפתח API נדרש רק במנוע-הענן; מודל מקומי (Ollama) לא צריך.
+
+    // רמז-מיקום קודם (בלי מפתח) — כדי שנוכל לדחות/לוותר על המפתח.
+    final opts = await _promptAreaHint();
+    if (opts == null || !mounted) return;
+
+    // מפתח API נדרש רק במנוע-הענן, ורק כשאין רמז: עם רמז המסלול הקלאסי
+    // רץ בלי שום קריאת-מודל (Overpass בלבד) — אין צורך במפתח. בלי רמז
+    // צריך לקרוא את שם-היישוב/AI, ואז המפתח דרוש. מודל מקומי לא צריך מפתח.
     var key = '';
     if (await AiEngine.engine() == AiEngine.gemini) {
-      var k = await GeminiAnchorService.getApiKey();
-      k ??= await _promptApiKey();
-      if (k == null || !mounted) return;
+      var k = await GeminiAnchorService.getApiKey() ?? '';
+      if (k.isEmpty && opts.hint.isEmpty) {
+        final entered = await _promptApiKey();
+        if (entered == null || !mounted) return;
+        k = entered;
+      }
       key = k;
     }
     if (!mounted) return;
-
-    // רמז-מיקום — מנחה את איתור האזור (שלב הג'יאוקודינג); null = ביטול.
-    final opts = await _promptAreaHint();
-    if (opts == null || !mounted) return;
 
     setState(() => _aiBusy = true);
     try {
