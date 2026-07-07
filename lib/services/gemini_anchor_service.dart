@@ -216,6 +216,20 @@ class GeminiAnchorService {
     final scaleX = imageWidth / sent.width;
     final scaleY = imageHeight / sent.height;
 
+    // גלאי-הצמתים לא נשלח למודל — אז לא מוגבל ל-1600px. נותנים לו קלט
+    // ברזולוציה מלאה של ה-workDim הפנימי (2200) כדי שימצא גם רחובות
+    // פנימיים (קריטי למפה מסובבת/מנופחת שבה sent=1600 מדלל צמתים).
+    const maxDetDim = 2400;
+    img.Image detImg = decoded;
+    if (decoded.width > maxDetDim || decoded.height > maxDetDim) {
+      detImg = decoded.width >= decoded.height
+          ? img.copyResize(decoded, width: maxDetDim)
+          : img.copyResize(decoded, height: maxDetDim);
+    }
+    final detToSent = sent.width / detImg.width; // detImg → sent-space
+    final detScaleX = imageWidth / detImg.width; // detImg → מקור
+    final detScaleY = imageHeight / detImg.height;
+
     // שם המנוע הפעיל להצגה בהודעות-הסטטוס.
     final engineName =
         await AiEngine.engine() == AiEngine.ollama ? 'מודל מקומי' : 'Gemini';
@@ -230,11 +244,17 @@ class GeminiAnchorService {
       // דרך המתודה הסטטית — closure מקומי כאן גורר את onStatus (הקשר widget)
       // שאינו בר-שליחה ל-Isolate. detectFull מחזיר גם נקודות-כביש —
       // דרושות לשער חפיפת-הכבישים במסלול הקלאסי.
-      final det = await RoadJunctionDetector.detectFullInIsolate(sent);
-      cvCandidates = det.features;
-      // נקודות-הכביש בפיקסלי-המקור (כמו junctionPx).
+      final det = await RoadJunctionDetector.detectFullInIsolate(detImg);
+      // ממפים את מאפייני-הגלאי ממרחב-detImg למרחב-sent (עבור מסלול ה-AI
+      // שמסמן את sent) — כך שאר הצנרת נשארת ללא שינוי.
+      cvCandidates = [
+        for (final f in det.features)
+          (pos: Point(f.pos.x * detToSent, f.pos.y * detToSent), kind: f.kind),
+      ];
+      // נקודות-הכביש בפיקסלי-המקור (למסלול הקלאסי).
       roadPointsScan = [
-        for (final p in det.roadPoints) Point(p.x * scaleX, p.y * scaleY),
+        for (final p in det.roadPoints)
+          Point(p.x * detScaleX, p.y * detScaleY),
       ];
     } catch (_) {}
     // מצב מהיר: קח רק את המועמדים החזקים ביותר (הגלאי מחזיר ממוינים).
