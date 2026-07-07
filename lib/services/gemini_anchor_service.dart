@@ -206,10 +206,17 @@ class GeminiAnchorService {
     // *להצביע* (גיאומטריה) — מחסל את סחף-ההצבעה ומייתר את שלב ההצמדה.
     onStatus?.call('מאתר צמתים ומאפיינים על הסריקה (עיבוד-תמונה)...');
     var cvCandidates = const <MapFeature>[];
+    var roadPointsScan = const <Point<double>>[];
     try {
       // דרך המתודה הסטטית — closure מקומי כאן גורר את onStatus (הקשר widget)
-      // שאינו בר-שליחה ל-Isolate.
-      cvCandidates = await RoadJunctionDetector.detectInIsolate(sent);
+      // שאינו בר-שליחה ל-Isolate. detectFull מחזיר גם נקודות-כביש —
+      // דרושות לשער חפיפת-הכבישים במסלול הקלאסי.
+      final det = await RoadJunctionDetector.detectFullInIsolate(sent);
+      cvCandidates = det.features;
+      // נקודות-הכביש בפיקסלי-המקור (כמו junctionPx).
+      roadPointsScan = [
+        for (final p in det.roadPoints) Point(p.x * scaleX, p.y * scaleY),
+      ];
     } catch (_) {}
     // מצב מהיר: קח רק את המועמדים החזקים ביותר (הגלאי מחזיר ממוינים).
     if (maxAnchors != null && cvCandidates.length > maxAnchors) {
@@ -255,6 +262,7 @@ class GeminiAnchorService {
         final classical = await _classicalMatch(
           junctionPx: junctionPx,
           scanRound: scanRound,
+          roadPointsScan: roadPointsScan,
           areaHint: areaHint.trim(),
         );
         if (classical != null && classical.length >= 4) {
@@ -891,6 +899,7 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
   Future<List<GeminiAnchorSuggestion>?> _classicalMatch({
     required List<Point<double>> junctionPx,
     required List<bool> scanRound,
+    required List<Point<double>> roadPointsScan,
     required String areaHint,
   }) async {
     // bbox צמוד ליישוב — ריפוד רחב בולע יישוב שכן עם רשת-כבישים דומה
@@ -908,11 +917,16 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     ));
     if (osm.junctions.length < 4) return null;
 
+    // נקודות-הכביש מפעילות את שער חפיפת-הכבישים: על מפה סכמטית שסוטה
+    // מ-OSM, החפיפה גרועה → matchInIsolate מחזיר null → נפילה-חזרה ל-AI
+    // (במקום להציג רישום-זבל "כמעט אבל לא").
     final res = await AnchorMatcher.matchInIsolate(
       scanPx: junctionPx,
       refGeo: osm.junctions,
       scanRound: scanRound,
       refRound: osm.isRoundabout,
+      scanRoad: roadPointsScan.isEmpty ? null : roadPointsScan,
+      refRoad: osm.roadPoints,
     );
     // דורשים יחס-inliers סביר — מגן מפני התאמה-חלקית מקרית.
     final minReq = max(4, (junctionPx.length * 0.35).round());
