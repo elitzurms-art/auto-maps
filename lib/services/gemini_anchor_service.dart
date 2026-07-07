@@ -941,10 +941,10 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     ));
     if (osm.junctions.length < 4) return null;
 
-    // [northUp]: המשתמש מאשר שהמפה מיושרת-צפון → רישום נעול-סיבוב (רק
-    // קנה-מידה+הזזה). זה מבטל את אמביגואיית-הסיבוב לחלוטין ועובד גם על
-    // מפות סכמטיות (העיוות נשאר כשארית, נסגר באישור-פר-נקודה/TPS).
-    // אחרת: matchInIsolate עם שער חפיפת-כבישים (דוחה מפה סכמטית → AI).
+    // [northUp]: רישום נעול-סיבוב (θ=0) — מהיר ומדויק למפה מיושרת-צפון.
+    // אחרת: **סריקת-זווית** (registerSweep) — סורק θ, נועל סיבוב בכל אחת,
+    // ומדרג לפי חפיפת-כבישים. מוצא את זווית-המפה לבד ומבטל את אמביגואיית-
+    // ה-RANSAC המלא (north-up הוא המקרה θ=0).
     final res = northUp
         ? await AnchorMatcher.registerNorthUpInIsolate(
             scanPx: junctionPx,
@@ -954,7 +954,7 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
             scanRoad: roadPointsScan.isEmpty ? null : roadPointsScan,
             refRoad: osm.roadPoints,
           )
-        : await AnchorMatcher.matchInIsolate(
+        : await AnchorMatcher.registerSweepInIsolate(
             scanPx: junctionPx,
             refGeo: osm.junctions,
             scanRound: scanRound,

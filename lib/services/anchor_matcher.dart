@@ -802,6 +802,187 @@ class AnchorMatcher {
     );
   }
 
+  /// **סריקת-זווית** — הכללה של [registerNorthUp] למפה מסובבת (בזווית לא-
+  /// ידועה אך קבועה). במקום לנעול סיבוב=0, סורק זוויות θ: לכל θ מריץ
+  /// רישום נעול-סיבוב (רק קנה-מידה+הזזה, בעיה יציבה) ומדרג לפי חפיפת-
+  /// כבישים. הזווית הנכונה מנצחת כי בזווית ההפוכה (θ+180) הכבישים אינם
+  /// חופפים. north-up הוא המקרה θ=0. מבטל את אמביגואיית-ה-RANSAC המלא.
+  static Future<MatchResult?> registerSweepInIsolate({
+    required List<Point<double>> scanPx,
+    required List<LatLng> refGeo,
+    List<bool>? scanRound,
+    List<bool>? refRound,
+    List<Point<double>>? scanRoad,
+    List<LatLng>? refRoad,
+  }) {
+    return Isolate.run(() => registerSweep(
+          scanPx: scanPx,
+          refGeo: refGeo,
+          scanRound: scanRound,
+          refRound: refRound,
+          scanRoad: scanRoad,
+          refRoad: refRoad,
+        ));
+  }
+
+  static MatchResult? registerSweep({
+    required List<Point<double>> scanPx,
+    required List<LatLng> refGeo,
+    List<bool>? scanRound,
+    List<bool>? refRound,
+    List<Point<double>>? scanRoad,
+    List<LatLng>? refRoad,
+    int minInliers = 4,
+    int seed = 7,
+  }) {
+    if (scanPx.length < minInliers || refGeo.length < minInliers) return null;
+    var lat0 = 0.0, lon0 = 0.0;
+    for (final g in refGeo) {
+      lat0 += g.latitude;
+      lon0 += g.longitude;
+    }
+    lat0 /= refGeo.length;
+    lon0 /= refGeo.length;
+    final mLon = 111320.0 * cos(lat0 * pi / 180);
+    _C toM(LatLng g) =>
+        _C((g.longitude - lon0) * mLon, (g.latitude - lat0) * 111320.0);
+    final ref = [for (final g in refGeo) toM(g)];
+    final scan = [for (final p in scanPx) _C(p.x, -p.y)]; // y-מסך מהופך
+
+    final scanSpan = _span(scan), refSpan = _span(ref);
+    if (scanSpan < 1 || refSpan < 1) return null;
+    final expScale = refSpan / scanSpan;
+    final minScale = expScale * 0.4, maxScale = expScale * 2.5;
+    final thrPx = scanSpan * 0.02;
+
+    final scanRoadC =
+        scanRoad == null ? null : [for (final p in scanRoad) _C(p.x, -p.y)];
+    final refRoadC = refRoad == null ? null : [for (final g in refRoad) toM(g)];
+    final useRoad = scanRoadC != null &&
+        refRoadC != null &&
+        scanRoadC.length >= 10 &&
+        refRoadC.length >= 10;
+
+    final rng = Random(seed);
+
+    // רישום נעול בזווית θ נתונה: RANSAC המסונן לסיבוב≈θ + עידון-ICP נעול.
+    // מחזיר (a, b, inliers, roadFit) או null.
+    ({_C a, _C b, int inliers, double roadFit})? tryAngle(double thetaDeg) {
+      final theta = thetaDeg * pi / 180;
+      final rot = _C(cos(theta), sin(theta)); // e^{iθ}
+      var bestInl = -1;
+      _C? bestA, bestB;
+      for (var iter = 0; iter < 6000; iter++) {
+        final i = rng.nextInt(scan.length), k = rng.nextInt(scan.length);
+        if (i == k) continue;
+        final dz = scan[i] - scan[k];
+        if (dz.abs < scanSpan * 0.1) continue;
+        final j = rng.nextInt(ref.length), l = rng.nextInt(ref.length);
+        if (j == l) continue;
+        final dw = ref[j] - ref[l];
+        if (dw.abs < 1) continue;
+        // סיבוב של dw/dz ≈ θ? (הפרש-זווית קטן)
+        final rel = dw / dz; // = s·e^{iΔ}
+        var dAng = (atan2(rel.im, rel.re) - theta).abs() % (2 * pi);
+        if (dAng > pi) dAng = 2 * pi - dAng;
+        if (dAng > 0.17) continue; // ~10°
+        final s = dw.abs / dz.abs;
+        if (s < minScale || s > maxScale) continue;
+        final a = rot * _C(s, 0); // סיבוב מדויק θ
+        final b = ref[j] - a * scan[i];
+        final thr2 = pow(thrPx * s, 2).toDouble();
+        var inl = 0;
+        for (final z in scan) {
+          final w = a * z + b;
+          var best = double.infinity;
+          for (final r in ref) {
+            final d2 = (w - r).abs2;
+            if (d2 < best) best = d2;
+          }
+          if (best <= thr2) inl++;
+        }
+        if (inl > bestInl) {
+          bestInl = inl;
+          bestA = a;
+          bestB = b;
+        }
+      }
+      if (bestInl < minInliers || bestA == null) return null;
+      // עידון-ICP נעול-סיבוב: u=z·rot; מתאים s(ממשי)+b ל-least-squares.
+      var a = bestA, b = bestB!;
+      for (var round = 0; round < 4; round++) {
+        final s0 = a.abs;
+        final thr2 = pow(thrPx * s0, 2).toDouble();
+        final ps = _correspondences(scan, ref, a, b, thr2, scanRound, refRound);
+        if (ps.length < minInliers) break;
+        // u_i = scan·rot ; פותרים w ≈ s·u + b.
+        var uc = const _C(0, 0), wc = const _C(0, 0);
+        final us = <_C>[], ws = <_C>[];
+        for (final p in ps) {
+          final u = scan[p.$1] * rot;
+          us.add(u);
+          ws.add(ref[p.$2]);
+          uc = uc + u;
+          wc = wc + ref[p.$2];
+        }
+        final n = ps.length.toDouble();
+        uc = _C(uc.re / n, uc.im / n);
+        wc = _C(wc.re / n, wc.im / n);
+        var num = 0.0, den = 0.0;
+        for (var t = 0; t < us.length; t++) {
+          final up = us[t] - uc, wp = ws[t] - wc;
+          num += up.re * wp.re + up.im * wp.im;
+          den += up.abs2;
+        }
+        if (den < 1e-9) break;
+        final s = num / den;
+        a = rot * _C(s, 0);
+        b = wc - uc * _C(s, 0);
+      }
+      final thr2f = pow(thrPx * a.abs, 2).toDouble();
+      final ps = _correspondences(scan, ref, a, b, thr2f, scanRound, refRound);
+      final roadFit =
+          useRoad ? _roadFit(scanRoadC, refRoadC, a, b) : -ps.length.toDouble();
+      return (a: a, b: b, inliers: ps.length, roadFit: roadFit);
+    }
+
+    // ציון: חפיפת-כבישים נמוכה = טוב (או יותר inliers כשאין כבישים).
+    ({_C a, _C b, int inliers, double roadFit})? best;
+    double bestScore = double.infinity;
+    void consider(double deg) {
+      final r = tryAngle(deg);
+      if (r == null) return;
+      final score = useRoad ? r.roadFit : -r.inliers.toDouble();
+      if (score < bestScore) {
+        bestScore = score;
+        best = r;
+      }
+    }
+
+    // סריקה גסה (כל 10°) ואז עידון (±9° בצעדי 1°) סביב הטוב.
+    for (var deg = 0; deg < 360; deg += 10) {
+      consider(deg.toDouble());
+    }
+    if (best == null) return null;
+    final coarseDeg = atan2(best!.a.im, best!.a.re) * 180 / pi;
+    for (var d = -9; d <= 9; d++) {
+      consider(coarseDeg + d);
+    }
+    if (best == null) return null;
+
+    return buildResult(
+      scanPx: scanPx,
+      refGeo: refGeo,
+      scanRound: scanRound,
+      refRound: refRound,
+      aRe: best!.a.re,
+      aIm: best!.a.im,
+      bRe: best!.b.re,
+      bIm: best!.b.im,
+      minInliers: minInliers,
+    );
+  }
+
   /// רישום מבוסס-קווים: מתאים את **קווי-הכביש כווקטורים** (לא נקודות
   /// מבודדות). כביש ארוך = וקטור מכוון (התחלה→סוף) שנותן כיוון+קנה-מידה+
   /// הזזה מהתאמה **אחת** — הכיוון נקבע מהוקטור, בלי הסימטריה שהרגה את
