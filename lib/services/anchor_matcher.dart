@@ -69,6 +69,12 @@ class MatchHypothesis {
 /// זו החלופה לשלב-ההתאמה החזותי של ה-VLM: מדויק-פיקסל בשני הצדדים,
 /// והקואורדינטה הסופית נלקחת מצומת-ה-OSM המדויק (snap), לא מהטרנספורמציה.
 class AnchorMatcher {
+  /// דיבוג סריקת-הזווית: כשדולק, [registerSweep] ממלא את [_sweepLog]
+  /// ב-(זווית, inliers, roadFit) לכל זווית-גסה — לאבחון בכלי-שורה.
+  static bool sweepDebug = false;
+  static final List<(int, int, double)> _sweepLog = [];
+  static List<(int, int, double)> get sweepLog => _sweepLog;
+
   /// מריץ את [match] ב-Isolate (ה-RANSAC כבד — עד כמה שניות). המתודה
   /// סטטית והפרמטרים ברי-שליחה, אז אין גרירת-הקשר.
   static Future<MatchResult?> matchInIsolate({
@@ -852,7 +858,9 @@ class AnchorMatcher {
     final scanSpan = _span(scan), refSpan = _span(ref);
     if (scanSpan < 1 || refSpan < 1) return null;
     final expScale = refSpan / scanSpan;
-    final minScale = expScale * 0.4, maxScale = expScale * 2.5;
+    // חלון-סקלה צמוד — מונע פתרונות-שווא מכווצים (scale זעיר) שסורק-הזווית
+    // עלול להעדיף כי אשכול קטן נותן חפיפת-כבישים "טובה" מקומית.
+    final minScale = expScale * 0.6, maxScale = expScale * 1.7;
     final thrPx = scanSpan * 0.02;
 
     final scanRoadC =
@@ -939,21 +947,26 @@ class AnchorMatcher {
         a = rot * _C(s, 0);
         b = wc - uc * _C(s, 0);
       }
+      // עידון עלול להבריח את הסקלה מחוץ לחלון — פוסלים.
+      if (a.abs < minScale || a.abs > maxScale) return null;
       final thr2f = pow(thrPx * a.abs, 2).toDouble();
       final ps = _correspondences(scan, ref, a, b, thr2f, scanRound, refRound);
       final roadFit =
-          useRoad ? _roadFit(scanRoadC, refRoadC, a, b) : -ps.length.toDouble();
+          useRoad ? _roadFit(scanRoadC, refRoadC, a, b) : double.nan;
       return (a: a, b: b, inliers: ps.length, roadFit: roadFit);
     }
 
-    // ציון: חפיפת-כבישים נמוכה = טוב (או יותר inliers כשאין כבישים).
+    // ציון: **מספר-inliers ראשית** (הזווית הנכונה מתאימה הכי הרבה צמתים),
+    // חפיפת-כבישים כשובר-שוויון (מבדיל בין הזווית הנכונה להפוכה). משקל
+    // inliers גבוה, כך שהפרש-inlier קטן נשבר ע"י חפיפה טובה יותר.
     ({_C a, _C b, int inliers, double roadFit})? best;
-    double bestScore = double.infinity;
+    double bestScore = -double.infinity;
     void consider(double deg) {
       final r = tryAngle(deg);
       if (r == null) return;
-      final score = useRoad ? r.roadFit : -r.inliers.toDouble();
-      if (score < bestScore) {
+      final score =
+          useRoad ? r.inliers * 10 - r.roadFit : r.inliers.toDouble();
+      if (score > bestScore) {
         bestScore = score;
         best = r;
       }
@@ -961,6 +974,10 @@ class AnchorMatcher {
 
     // סריקה גסה (כל 10°) ואז עידון (±9° בצעדי 1°) סביב הטוב.
     for (var deg = 0; deg < 360; deg += 10) {
+      if (sweepDebug) {
+        final r = tryAngle(deg.toDouble());
+        _sweepLog.add((deg, r?.inliers ?? 0, r?.roadFit ?? double.nan));
+      }
       consider(deg.toDouble());
     }
     if (best == null) return null;
@@ -969,6 +986,11 @@ class AnchorMatcher {
       consider(coarseDeg + d);
     }
     if (best == null) return null;
+
+    // שער-איכות: אם אין זווית עם חפיפת-כבישים טובה (מפה שהגלאי לא מזהה
+    // היטב תחת סיבוב — אין שיא), עדיף null → נפילה-חזרה ל-AI מלהציג
+    // רישום מסובב שגוי.
+    if (useRoad && best!.roadFit > 24) return null;
 
     return buildResult(
       scanPx: scanPx,

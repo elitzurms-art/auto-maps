@@ -85,6 +85,107 @@ class RoadJunctionDetector {
   ///
   /// [debugDir] — כשמוגדר, כותב לשם PNG של כל שלב-ביניים (מסכה, שלד...)
   /// + '00_info.txt' עם ערכי הכיול. לכיול הגלאי על מפות אמיתיות.
+  /// **הערכת-סיבוב (deskew)** מהיסטוגרמת-כיווני-שיפוע — *לפני* זיהוי
+  /// הצמתים. עובד על תמונה מסובבת (שיפועים חסינים לאי-חסינות-הצמתים של
+  /// הגלאי): רשת-כבישים/מסגרת יוצרות שיפועים חזקים בשני כיוונים ניצבים;
+  /// קיפול mod 90° מאחד אותם לשיא אחד = זווית-הרשת. מחזיר את הסטייה
+  /// מיישור-צירים בטווח [-45,45]° (לתיקון: סובב את התמונה ב-‏minus התוצאה).
+  /// ריצה ב-Isolate דרך [estimateSkewInIsolate].
+  static Future<double> estimateSkewInIsolate(img.Image src) =>
+      Isolate.run(() => estimateSkewDeg(src));
+
+  /// **הערכת-סיבוב ב-projection-profile** (חסין-aliasing, בניגוד לשיפועים):
+  /// אוסף פיקסלי-מבנה כהים, מסובב אותם בזוויות 0–90°, ובכל זווית מודד עד
+  /// כמה הם מתרכזים לשורות/עמודות חדות (Σcount² על שני הצירים). רשת-כבישים
+  /// מיושרת-צירים = ריכוז מקסימלי. מחזיר סטייה ב-[-45,45]°.
+  static double estimateSkewDeg(img.Image src) {
+    const dim = 1000; // רזולוציה בינונית מספיקה לזווית
+    var work = src;
+    final maxSide = max(src.width, src.height);
+    if (maxSide > dim) {
+      work = src.width >= src.height
+          ? img.copyResize(src, width: dim)
+          : img.copyResize(src, height: dim);
+    }
+    final w = work.width, h = work.height;
+    if (w < 40 || h < 40) return 0;
+    final lum = Uint8List(w * h);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        lum[y * w + x] = img.getLuminance(work.getPixel(x, y)).round();
+      }
+    }
+    final content = _contentMask(lum, w, h);
+    // סף: פיקסלי-מבנה = כהים מהחציון (כבישים כהים/קווי-שפה/טקסט/מסגרת).
+    final vals = <int>[];
+    for (var i = 0; i < lum.length; i++) {
+      if (content[i] == 1) vals.add(lum[i]);
+    }
+    if (vals.length < 500) return 0;
+    vals.sort();
+    final median = vals[vals.length ~/ 2];
+    final thr = median - 30; // כהה משמעותית מהרקע
+    // קואורדינטות פיקסלי-המבנה, ממורכזות (עד ~20000, דגימה).
+    final xs = <double>[], ys = <double>[];
+    final cx = w / 2, cy = h / 2;
+    var step = 1;
+    // הערכת מונה גס לקביעת דגימה
+    for (var i = 0; i < lum.length; i += 7) {
+      if (content[i] == 1 && lum[i] <= thr) step++;
+    }
+    step = (step / 20000).ceil().clamp(1, 50);
+    var cnt = 0;
+    for (var i = 0; i < lum.length; i++) {
+      if (content[i] == 1 && lum[i] <= thr) {
+        if (cnt++ % step != 0) continue;
+        xs.add((i % w) - cx);
+        ys.add((i ~/ w) - cy);
+      }
+    }
+    if (xs.length < 200) return 0;
+
+    double score(double deg) {
+      final t = deg * pi / 180, c = cos(t), s = sin(t);
+      const nb = 400;
+      final rows = Float64List(nb), cols = Float64List(nb);
+      final half = (max(w, h)).toDouble();
+      for (var i = 0; i < xs.length; i++) {
+        final xr = c * xs[i] - s * ys[i];
+        final yr = s * xs[i] + c * ys[i];
+        final rb = (((yr + half) / (2 * half)) * nb).floor().clamp(0, nb - 1);
+        final cb = (((xr + half) / (2 * half)) * nb).floor().clamp(0, nb - 1);
+        rows[rb] += 1;
+        cols[cb] += 1;
+      }
+      var e = 0.0;
+      for (var i = 0; i < nb; i++) {
+        e += rows[i] * rows[i] + cols[i] * cols[i];
+      }
+      return e;
+    }
+
+    // סריקה גסה 0–89° (סימטריית-רשת 90°) ואז עידון ±1° בצעדי 0.25°.
+    var bestDeg = 0.0, bestScore = -1.0;
+    for (var d = 0; d < 90; d++) {
+      final sc = score(d.toDouble());
+      if (sc > bestScore) {
+        bestScore = sc;
+        bestDeg = d.toDouble();
+      }
+    }
+    for (var dd = -10; dd <= 10; dd++) {
+      final d = bestDeg + dd * 0.25;
+      final sc = score(d);
+      if (sc > bestScore) {
+        bestScore = sc;
+        bestDeg = d;
+      }
+    }
+    var phi = bestDeg % 90;
+    if (phi > 45) phi -= 90; // לטווח [-45,45]
+    return phi;
+  }
+
   /// כמו [detectFull] אבל מחזיר רק את המאפיינים (תאימות אחורה).
   static List<MapFeature> detect(
     img.Image src, {
@@ -129,21 +230,29 @@ class RoadJunctionDetector {
     //       נוב") — סף "בהיר מהרקע".
     //    מריצים את הצנרת על שתי הקוטביות ובוחרים את הענף שמניב יותר
     //    צמתים — הרשת האמיתית עשירה בצמתים, הקוטביות השגויה נותנת פירורים.
+    // מסכת-תוכן — מחריגה רקע-חוץ אחיד (פינות-סיבוב/שוליים) מכל חישובי-הסף.
+    final content = _contentMask(lum, w, h);
     final hist = List<int>.filled(256, 0);
-    for (final v in lum) {
-      hist[v]++;
+    var contentCount = 0;
+    for (var i = 0; i < lum.length; i++) {
+      if (content[i] == 1) {
+        hist[lum[i]]++;
+        contentCount++;
+      }
     }
     var bgPeak = 255;
     for (var v = 129; v < 256; v++) {
       if (hist[v] > hist[bgPeak]) bgPeak = v;
     }
-    final thrDark = min(max(_otsu(lum), bgPeak - 40), bgPeak - 12);
+    final thrDark =
+        min(max(_otsuHist(hist, contentCount), bgPeak - 40), bgPeak - 12);
     final thrBright = min(bgPeak + 12, 250);
     final maskDark = Uint8List(w * h);
     final maskBright = Uint8List(w * h);
     final maskCorr = Uint8List(w * h);
     var nDark = 0, nBright = 0, nCorr = 0;
     for (var i = 0; i < lum.length; i++) {
+      if (content[i] == 0) continue; // דילוג על רקע-חוץ
       // <= — בקונבנציית אוצו ערך-הסף עצמו שייך למחלקה הכהה.
       if (lum[i] <= thrDark) {
         maskDark[i] = 1;
@@ -854,7 +963,75 @@ class RoadJunctionDetector {
     for (final v in lum) {
       hist[v]++;
     }
-    final total = lum.length;
+    return _otsuHist(hist, lum.length);
+  }
+
+  /// מסכת-תוכן: מחריגה את הרקע האחיד שמחוץ למפה (הפינות הלבנות שנוצרות
+  /// בסיבוב, או שוליים בצילום) ע"י flood-fill מגבולות-התמונה על פיקסלים
+  /// דומי-רקע. בלי זה, פינות-לבנות מזיזות את סף-Otsu ואת bgPeak ומדללות
+  /// את הצמתים. מוחל רק כשהאזור-החיצוני משמעותי-אך-לא-הכל (2%–70%);
+  /// אחרת (מפה שממלאת פריים) מוחזר "הכל תוכן".
+  static Uint8List _contentMask(Uint8List lum, int w, int h) {
+    final n = w * h;
+    // ערך-רקע = חציון הבהירות על הגבול (הרקע-החיצוני נוגע בגבול).
+    final border = <int>[];
+    for (var x = 0; x < w; x += 2) {
+      border.add(lum[x]);
+      border.add(lum[(h - 1) * w + x]);
+    }
+    for (var y = 0; y < h; y += 2) {
+      border.add(lum[y * w]);
+      border.add(lum[y * w + w - 1]);
+    }
+    border.sort();
+    final seed = border[border.length ~/ 2];
+    const tol = 16;
+    final outside = Uint8List(n);
+    final q = <int>[];
+    void push(int i) {
+      if (outside[i] == 0 && (lum[i] - seed).abs() <= tol) {
+        outside[i] = 1;
+        q.add(i);
+      }
+    }
+    for (var x = 0; x < w; x++) {
+      push(x);
+      push((h - 1) * w + x);
+    }
+    for (var y = 0; y < h; y++) {
+      push(y * w);
+      push(y * w + w - 1);
+    }
+    var head = 0;
+    while (head < q.length) {
+      final i = q[head++];
+      final x = i % w, y = i ~/ w;
+      if (x > 0) push(i - 1);
+      if (x < w - 1) push(i + 1);
+      if (y > 0) push(i - w);
+      if (y < h - 1) push(i + w);
+    }
+    var outCount = 0;
+    for (var i = 0; i < n; i++) {
+      if (outside[i] == 1) outCount++;
+    }
+    final frac = outCount / n;
+    final content = Uint8List(n);
+    if (frac < 0.02 || frac > 0.7) {
+      // אין שוליים ברורים (או שהכל אחיד) — לא ממסכים.
+      for (var i = 0; i < n; i++) {
+        content[i] = 1;
+      }
+    } else {
+      for (var i = 0; i < n; i++) {
+        content[i] = outside[i] == 0 ? 1 : 0;
+      }
+    }
+    return content;
+  }
+
+  static int _otsuHist(List<int> hist, int total) {
+    if (total == 0) return 128;
     var sum = 0.0;
     for (var i = 0; i < 256; i++) {
       sum += i * hist[i];
