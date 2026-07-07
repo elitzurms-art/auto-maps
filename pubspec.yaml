@@ -45,6 +45,9 @@ dependencies:
   # Image handling & export
   image: any
 
+  # PDF input — רינדור עמוד-מפה ל-PNG (pdfium; Windows/Android/iOS/macOS)
+  pdfx: ^2.6.0
+
   # KML/KMZ parsing (world_file_parser_service dependency)
   archive: ^3.6.1
   xml: any

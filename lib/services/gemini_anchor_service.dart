@@ -187,8 +187,8 @@ class GeminiAnchorService {
     // גלאי הצמתים הקלאסי — עיבוד-תמונה מקומי, מדויק-פיקסל, בלי מכסות.
     // כשהוא מוצא מספיק מועמדים, Gemini רק *בוחר ומתאר* (סמנטיקה) במקום
     // *להצביע* (גיאומטריה) — מחסל את סחף-ההצבעה ומייתר את שלב ההצמדה.
-    onStatus?.call('מאתר צמתים על הסריקה (עיבוד-תמונה)...');
-    var cvCandidates = const <Point<double>>[];
+    onStatus?.call('מאתר צמתים ומאפיינים על הסריקה (עיבוד-תמונה)...');
+    var cvCandidates = const <MapFeature>[];
     try {
       // דרך המתודה הסטטית — closure מקומי כאן גורר את onStatus (הקשר widget)
       // שאינו בר-שליחה ל-Isolate.
@@ -555,12 +555,12 @@ ${feedback.join('\n')}
   // ═══ מסלול ה-CV — בחירת עוגנים מתוך צמתים שאותרו אלגוריתמית ═══
 
   /// מסמן את מועמדי-הגלאי על עותק הסריקה: טבעת+נקודה סגולות ומספר לצידן.
-  List<int> _markCandidates(img.Image sent, List<Point<double>> cands) {
+  List<int> _markCandidates(img.Image sent, List<MapFeature> cands) {
     final marked = img.Image.from(sent);
     final purple = img.ColorRgb8(180, 0, 200);
     for (var i = 0; i < cands.length; i++) {
-      final x = cands[i].x.round().clamp(0, sent.width - 1);
-      final y = cands[i].y.round().clamp(0, sent.height - 1);
+      final x = cands[i].pos.x.round().clamp(0, sent.width - 1);
+      final y = cands[i].pos.y.round().clamp(0, sent.height - 1);
       img.fillCircle(marked, x: x, y: y, radius: 3, color: purple);
       img.drawCircle(marked, x: x, y: y, radius: 11, color: purple);
       img.drawString(
@@ -579,7 +579,7 @@ ${feedback.join('\n')}
   /// להצביע בעצמו: הפיקסל נלקח מהגלאי, מדויק. [used] מתעדכן בבחירות.
   Future<_Extraction> _selectFromCandidates({
     required List<int> markedJpeg,
-    required List<Point<double>> candidates,
+    required List<MapFeature> candidates,
     required Set<int> used,
     required double scaleX,
     required double scaleY,
@@ -589,15 +589,30 @@ ${feedback.join('\n')}
     required String? areaHint,
     required List<String> feedback,
   }) async {
+    final typeLines = <String, List<int>>{};
+    for (var i = 0; i < candidates.length; i++) {
+      typeLines
+          .putIfAbsent(
+            RoadJunctionDetector.kindLabel(candidates[i].kind),
+            () => [],
+          )
+          .add(i + 1);
+    }
+    final typesText = typeLines.entries
+        .map((e) => '${e.key}: ${e.value.join(",")}')
+        .join(' · ');
+
     var prompt =
         '''
-אתה עוזר ג'יאורפרנס. לפניך תמונת מפה (סרוקה, מצולמת או משורטטת ביד), ככל הנראה של אזור בישראל, ועליה ${candidates.length} מועמדי-עוגן שסומנו **אלגוריתמית** (טבעות סגולות ממוספרות 1-${candidates.length}) על מפגשי-קווים שזוהו בעיבוד-תמונה. מיקומי הטבעות מדויקים; חלק מהמועמדים עשויים להיות רעש (מפגש-קווים שאינו צומת דרכים, קצה מסגרת, סמל).
+אתה עוזר ג'יאורפרנס. לפניך תמונת מפה (סרוקה, מצולמת או משורטטת ביד), ככל הנראה של אזור בישראל, ועליה ${candidates.length} מועמדי-עוגן שסומנו **אלגוריתמית** (טבעות סגולות ממוספרות 1-${candidates.length}). מיקומי הטבעות מדויקים; חלק מהמועמדים עשויים להיות רעש (מפגש-קווים שאינו צומת דרכים, קצה מסגרת, סמל).
+
+סוג כל מועמד לפי הגלאי: $typesText
 
 משימה 1 — זהה את האזור: קרא את הכיתוב על המפה (כותרת, שם יישוב, שמות רחובות, מספרי כבישים) והחזר:
 - regionName: שם היישוב/האזור (בעברית)
 - regionLat, regionLon: הערכה גסה בלבד של מרכז האזור ב-WGS84 (0,0 אם אין לך מושג)
 ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמז מיקום: "${areaHint.trim()}" — התחשב בו בזיהוי האזור בלבד.\n' : ''}
-משימה 2 — בחר עד 12 מועמדים שהם עוגנים אמיתיים ושימושיים: צומת דרכים, כיכר או מפגש-דרכים ברור. העדף פיזור רחב על פני המפה, ואל תבחר מועמד שנראה רעש.
+משימה 2 — בחר עד 12 מועמדים שהם עוגנים אמיתיים ושימושיים: צומת דרכים, כיכר, קצה-דרך (מבוי סתום) או עיקול ברור. העדף פיזור רחב על פני המפה, ואל תבחר מועמד שנראה רעש.
 
 **כלל ברזל: תאר אך ורק את מה שמצויר או כתוב בתמונה.** אל תשתמש בשם מקום מהזיכרון שלך שאינו כתוב על המפה עצמה.
 
@@ -605,7 +620,7 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
 - candidateIndex: מספר המועמד (1-${candidates.length})
 - name: תיאור ויזואלי קצר בעברית ("צומת T בכניסה הדרומית"); שם כתוב על המפה ליד הנקודה מותר לצטט
 - confidence: 0-1
-- basis: סוג הנקודה (צומת / כיכר / מפגש דרכים)''';
+- basis: סוג הנקודה (צומת / כיכר / קצה דרך / עיקול)''';
 
     if (used.isNotEmpty) {
       prompt +=
@@ -673,11 +688,12 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
       final c = candidates[idx - 1];
       anchors.add((
         pixel: Offset(
-          (c.x * scaleX).clamp(0, imageWidth.toDouble()),
-          (c.y * scaleY).clamp(0, imageHeight.toDouble()),
+          (c.pos.x * scaleX).clamp(0, imageWidth.toDouble()),
+          (c.pos.y * scaleY).clamp(0, imageHeight.toDouble()),
         ),
         name: e['name'] as String? ?? '',
-        basis: e['basis'] as String? ?? '',
+        basis: e['basis'] as String? ??
+            RoadJunctionDetector.kindLabel(c.kind),
         confidence: (e['confidence'] as num?)?.toDouble() ?? 0,
       ));
     }

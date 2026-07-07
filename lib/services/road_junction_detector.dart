@@ -5,8 +5,26 @@ import 'dart:typed_data';
 
 import 'package:image/image.dart' as img;
 
-/// גלאי צמתים קלאסי (עיבוד-תמונה, בלי מודל): מוצא מפגשי-דרכים במפה
-/// משורטטת/סרוקה בדיוק-פיקסל ודטרמיניסטית.
+/// סוג האלמנט שאותר — קובע את התיאור שמוצג ל-Gemini ולמשתמש.
+enum MapFeatureKind {
+  /// מפגש 3+ דרכים.
+  junction,
+
+  /// קצה-דרך / מבוי סתום (ענף-שלד יחיד).
+  deadEnd,
+
+  /// כיכר — טבעת דרך סביב אי קטן ועגול, או דיסק-דרך מוצק קטן ועגול.
+  roundabout,
+
+  /// עיקול חד בדרך (שינוי-כיוון גדול בשלד).
+  bend,
+}
+
+/// מועמד-עוגן שאותר אלגוריתמית: מיקום + סוג.
+typedef MapFeature = ({Point<double> pos, MapFeatureKind kind});
+
+/// גלאי מאפייני-מפה קלאסי (עיבוד-תמונה, בלי מודל): מוצא צמתים, קצוות-דרך,
+/// מבנים ועיקולים במפה משורטטת/סרוקה בדיוק-פיקסל ודטרמיניסטית.
 ///
 /// הצנרת: בהירות → סף Otsu (משיחות כהות על רקע בהיר) → פתיחה מורפולוגית
 /// (מוחקת טקסט וקווים דקים, משאירה דרכים עבות) → הסרת רכיבים קטנים →
@@ -21,24 +39,32 @@ class RoadJunctionDetector {
   /// State/מסך גורר את כל הקשר ה-widget ‏(WidgetsFlutterBinding וכו') שאינו
   /// בר-שליחה בין isolates — "object is unsendable". כאן בסביבה יש רק את
   /// הפרמטר.
-  static Future<List<Point<double>>> detectInIsolate(img.Image image) {
+  static Future<List<MapFeature>> detectInIsolate(img.Image image) {
     return Isolate.run(() => detect(image));
   }
 
   /// מריץ את [detect] ב-Isolate על קובץ — הפענוח הכבד קורה בתוך ה-Isolate.
-  static Future<List<Point<double>>> detectFileInIsolate(String imagePath) {
+  static Future<List<MapFeature>> detectFileInIsolate(String imagePath) {
     return Isolate.run(() {
       final decoded = img.decodeImage(File(imagePath).readAsBytesSync());
-      return decoded == null ? const <Point<double>>[] : detect(decoded);
+      return decoded == null ? const <MapFeature>[] : detect(decoded);
     });
   }
 
-  /// מחזיר מרכזי-צומת מועמדים בקואורדינטות של [src], ממוינים לפי חוזק
-  /// עם פיזור מרחבי. רשימה ריקה כשהתמונה לא נראית כמו שרטוט-קווים.
+  /// תווית עברית קצרה לסוג-מאפיין (לפרומפט ולטולטיפ).
+  static String kindLabel(MapFeatureKind kind) => switch (kind) {
+        MapFeatureKind.junction => 'צומת',
+        MapFeatureKind.deadEnd => 'קצה דרך',
+        MapFeatureKind.roundabout => 'כיכר',
+        MapFeatureKind.bend => 'עיקול',
+      };
+
+  /// מחזיר מועמדי-עוגן (צמתים, קצוות-דרך, מבנים, עיקולים) בקואורדינטות של
+  /// [src], עם פיזור מרחבי. רשימה ריקה כשהתמונה לא נראית כמו שרטוט-קווים.
   ///
   /// [debugDir] — כשמוגדר, כותב לשם PNG של כל שלב-ביניים (מסכה, שלד...)
   /// + '00_info.txt' עם ערכי הכיול. לכיול הגלאי על מפות אמיתיות.
-  static List<Point<double>> detect(
+  static List<MapFeature> detect(
     img.Image src, {
     int maxCandidates = 24,
     String? debugDir,
@@ -116,17 +142,17 @@ class RoadJunctionDetector {
       _dbgSave(debugDir, '01_mask_corridor.png', maskCorr, w, h);
     }
 
-    final darkClusters = (nDark < 200 || nDark > lum.length * 0.55)
-        ? const <_Cluster>[]
+    final darkRes = (nDark < 200 || nDark > lum.length * 0.55)
+        ? _BranchResult.empty
         : _clustersFromMask(maskDark, w, h, debugDir, 'dark');
-    final brightClusters = nBright < 200
-        ? const <_Cluster>[]
+    final brightRes = nBright < 200
+        ? _BranchResult.empty
         : _clustersFromMask(maskBright, w, h, debugDir, 'bright');
     // מסדרונות: בלי סגירה (הייתה מגשרת את קווי-הגבול הדקים של המגרשים
     // וממזגת אותם עם הכבישים), ורק הרכיב הגדול — תאי-המגרשים (גם הם
     // בצבע-רקע, מוקפים קו) הם רכיבים קטנים נפרדים.
-    final corrClusters = nCorr < 200
-        ? const <_Cluster>[]
+    final corrRes = nCorr < 200
+        ? _BranchResult.empty
         : _clustersFromMask(
             maskCorr,
             w,
@@ -138,42 +164,72 @@ class RoadJunctionDetector {
           );
 
     // הרשת האמיתית עשירה בצמתים; הקוטביות/הגישה השגויה נותנת פירורים.
-    var clusters = darkClusters;
-    if (brightClusters.length > clusters.length) clusters = brightClusters;
-    if (corrClusters.length > clusters.length) clusters = corrClusters;
-    clusters = List<_Cluster>.from(clusters);
-    if (clusters.isEmpty) return const [];
+    // הבחירה לפי צמתים בלבד — הם המדד האמין לעושר-רשת.
+    var res = darkRes;
+    if (brightRes.junctions.length > res.junctions.length) res = brightRes;
+    if (corrRes.junctions.length > res.junctions.length) res = corrRes;
+    if (res.junctions.isEmpty && res.deadEnds.isEmpty) return const [];
 
-    // 8) בחירה: לפי משקל, עם מרחק-מינימום ביניהם (פיזור); הקלה אם דליל.
-    clusters.sort((a, b) => b.weight.compareTo(a.weight));
-    final picked = <_Cluster>[];
-    for (final minSep in [max(w, h) * 0.06, max(w, h) * 0.03]) {
-      for (final c in clusters) {
-        if (picked.length >= maxCandidates) break;
-        if (picked.any(
-          (p) => (p.cx - c.cx).abs() < minSep && (p.cy - c.cy).abs() < minSep,
-        )) {
-          continue;
-        }
-        if (picked.any((p) => identical(p, c))) continue;
-        picked.add(c);
+    // בחירה: צמתים תחילה (לפי משקל, עם מרחק-מינימום לפיזור; הקלה אם
+    // דליל), ואז מכסה קטנה מכל סוג נוסף — מגוון עוזר ל-Gemini לבחור.
+    final picked = <(_Cluster, MapFeatureKind)>[];
+    bool farEnough(_Cluster c, double sep) => picked.every(
+          (p) => (p.$1.cx - c.cx).abs() >= sep || (p.$1.cy - c.cy).abs() >= sep,
+        );
+    void pickFrom(
+      List<_Cluster> list,
+      MapFeatureKind kind,
+      int quota,
+      double sep,
+    ) {
+      var taken = 0;
+      for (final c in list) {
+        if (taken >= quota || picked.length >= maxCandidates) return;
+        if (!farEnough(c, sep)) continue;
+        picked.add((c, kind));
+        taken++;
       }
-      if (picked.length >= 4) break;
     }
+
+    final junctions = List<_Cluster>.from(res.junctions)
+      ..sort((a, b) => b.weight.compareTo(a.weight));
+    final side = max(w, h).toDouble();
+    // כיכרות ראשונות — מרכז הכיכר עדיף על צמתי-השפה שלה, ובדיקת-הפיזור
+    // של הצמתים אחריהן תחסום את צמתי-השפה המיותרים.
+    final roundabouts = List<_Cluster>.from(res.roundabouts)
+      ..sort((a, b) => b.weight.compareTo(a.weight));
+    pickFrom(roundabouts, MapFeatureKind.roundabout, 4, side * 0.04);
+    pickFrom(junctions, MapFeatureKind.junction, 14, side * 0.06);
+    if (picked.length < 4) {
+      pickFrom(junctions, MapFeatureKind.junction, 14, side * 0.03);
+    }
+    final deadEnds = List<_Cluster>.from(res.deadEnds)
+      ..sort((a, b) => b.weight.compareTo(a.weight));
+    final bends = List<_Cluster>.from(res.bends)
+      ..sort((a, b) => b.weight.compareTo(a.weight));
+    pickFrom(deadEnds, MapFeatureKind.deadEnd, 4, side * 0.04);
+    pickFrom(bends, MapFeatureKind.bend, 4, side * 0.04);
 
     if (debugDir != null) {
       final vis = img.Image.from(work);
-      for (final c in picked) {
+      for (final (c, kind) in picked) {
+        final color = switch (kind) {
+          MapFeatureKind.junction => img.ColorRgb8(255, 0, 200),
+          MapFeatureKind.deadEnd => img.ColorRgb8(255, 140, 0),
+          MapFeatureKind.roundabout => img.ColorRgb8(0, 90, 255),
+          MapFeatureKind.bend => img.ColorRgb8(0, 170, 0),
+        };
         img.drawCircle(vis, x: c.cx.round(), y: c.cy.round(), radius: 12,
-            color: img.ColorRgb8(255, 0, 200));
+            color: color);
         img.drawCircle(vis, x: c.cx.round(), y: c.cy.round(), radius: 13,
-            color: img.ColorRgb8(255, 0, 200));
+            color: color);
       }
       File('$debugDir/06_candidates.png').writeAsBytesSync(img.encodePng(vis));
     }
 
     return [
-      for (final c in picked) Point(c.cx * scale, c.cy * scale),
+      for (final (c, kind) in picked)
+        (pos: Point(c.cx * scale, c.cy * scale), kind: kind),
     ];
   }
 
@@ -193,9 +249,10 @@ class RoadJunctionDetector {
     File('$dir/$name').writeAsBytesSync(img.encodePng(im));
   }
 
-  /// הצנרת המשותפת לשתי הקוטביות: פתיחה → מחיקת גושים → סינון רכיבים →
-  /// דילול → צמתי crossing-number → אשכולות. משנה את [mask] במקום.
-  static List<_Cluster> _clustersFromMask(
+  /// הצנרת המשותפת לענפים: סגירה → פתיחה → מחיקת גושים → סינון רכיבים →
+  /// דילול → מאפיינים (צמתים/קצוות/עיקולים מהשלד + מבנים מהסינון).
+  /// משנה את [mask] במקום.
+  static _BranchResult _clustersFromMask(
     Uint8List mask,
     int w,
     int h,
@@ -210,7 +267,7 @@ class RoadJunctionDetector {
     // הפתיחה חייבת לשמר את הדרך ה*דקה* ביותר (לא הממוצעת): שחיקת r מוחקת
     // כל קו צר מ-2r+1, אז r ≤ (רוחב-הדרך-הדקה − 1) / 2.
     final strokeW = _estimateStrokeWidth(mask, w, h);
-    if (strokeW == 0) return const [];
+    if (strokeW == 0) return _BranchResult.empty;
     final closeRadius = closeFirst ? (strokeW * 0.3).round().clamp(1, 3) : 0;
     // ‎×0.8 — מרווח-ביטחון: האומדן הוא p25, והדרך הדקה באמת יכולה להיות
     // ~20% צרה ממנו; עדיף שקצת טקסט ישרוד (הסינון בהמשך) מלמחוק רחוב.
@@ -233,8 +290,13 @@ class RoadJunctionDetector {
     // עבים מפי-2 מרוחב-דרך, וניפוח-חזרה עם שוליים מוחק את הגוש וסביבתו,
     // כולל צמתי-הסרק שעל גבולו.
     final blobCore = _erode(m, w, h, blobRadius);
+    Uint8List? blobZone;
+    // כיכר "מלאה" (דיסק-דרך מוצק): ליבת-גוש קטנה, עגולה וקרובה-לריבועית —
+    // נרשמת כמועמדת-כיכר לפני שהגוש נמחק מהמסכה.
+    final roundabouts =
+        _roundBlobCores(blobCore, w, h, strokeW, blobRadius);
     if (blobCore.any((v) => v == 1)) {
-      final blobZone = _dilate(blobCore, w, h, blobRadius + 6);
+      blobZone = _dilate(blobCore, w, h, blobRadius + 6);
       for (var i = 0; i < m.length; i++) {
         if (blobZone[i] == 1) m[i] = 0;
       }
@@ -257,11 +319,16 @@ class RoadJunctionDetector {
     final skel = _thinZhangSuen(m, w, h);
     _dbgSave(debugDir, '05_${tag}_skeleton.png', skel, w, h);
 
-    // פיקסלי-צומת לפי crossing-number: מספר מעברי 0→1 בסריקה מעגלית של
-    // 8 השכנים. קו ישר (גם מדרגת-אלכסון) = 2 מעברים; צומת אמיתי = 3+.
-    // ספירת-שכנים פשוטה מסמנת בטעות את כל מדרגות האלכסון כצמתים.
+    // מאפיינים לפי crossing-number: מספר מעברי 0→1 בסריקה מעגלית של
+    // 8 השכנים. קו ישר (גם מדרגת-אלכסון) = 2 מעברים; צומת אמיתי = 3+;
+    // קצה-דרך = 1. ספירת-שכנים פשוטה מסמנת בטעות מדרגות-אלכסון כצמתים.
     const margin = 16;
-    final nodePts = <int>[]; // אינדקסים שטוחים
+    // אזור-פסילה לקצוות: מחיקת-הגושים חותכת דרכים על גבול הגוש ומייצרת
+    // קצוות-סרק — פוסלים קצה בקרבת אזור שנמחק.
+    final deadEndExcl =
+        blobZone == null ? null : _dilate(blobZone, w, h, 10);
+    final junctionPts = <int>[];
+    final deadEndPts = <int>[];
     for (var y = margin; y < h - margin; y++) {
       final row = y * w;
       for (var x = margin; x < w - margin; x++) {
@@ -276,13 +343,216 @@ class RoadJunctionDetector {
         for (var k = 0; k < 8; k++) {
           if (ring[k] == 0 && ring[(k + 1) % 8] == 1) transitions++;
         }
-        if (transitions >= 3) nodePts.add(row + x);
+        if (transitions >= 3) {
+          junctionPts.add(row + x);
+        } else if (transitions == 1 &&
+            (deadEndExcl == null || deadEndExcl[row + x] == 0)) {
+          deadEndPts.add(row + x);
+        }
       }
     }
-    if (nodePts.isEmpty) return const [];
 
-    // אשכול נקודות-צומת סמוכות (עד 16px) → מרכז + משקל
-    return _cluster(nodePts, w, 16);
+    // כיכר "טבעת": אי-רקע קטן ועגול שכלוא בתוך המסכה (מוקף דרך מכל עבר).
+    roundabouts.addAll(_roundIslands(m, w, h, strokeW));
+
+    final junctions = _cluster(junctionPts, w, 16);
+    final deadEnds = _cluster(deadEndPts, w, 16);
+    final bends = _findBends(skel, w, h, junctionPts, strokeW);
+    return _BranchResult(junctions, deadEnds, bends, roundabouts);
+  }
+
+  /// כיכרות מלאות: רכיבי ליבת-הגושים שהם קטנים ועגולים. עיגול ממלא ~π/4
+  /// מה-bbox שלו; מלבן ממלא ~1.0 — כך מבחינים כיכר מתיבת-מקרא/מבנה.
+  static List<_Cluster> _roundBlobCores(
+    Uint8List core,
+    int w,
+    int h,
+    int strokeW,
+    int blobRadius,
+  ) {
+    final out = <_Cluster>[];
+    final visited = Uint8List(w * h);
+    final stack = <int>[];
+    for (var start = 0; start < core.length; start++) {
+      if (core[start] == 0 || visited[start] == 1) continue;
+      var size = 0, sx = 0, sy = 0;
+      var minX = w, maxX = 0, minY = h, maxY = 0;
+      stack.add(start);
+      visited[start] = 1;
+      while (stack.isNotEmpty) {
+        final p = stack.removeLast();
+        final x = p % w, y = p ~/ w;
+        size++;
+        sx += x;
+        sy += y;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            final nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            final q = ny * w + nx;
+            if (core[q] == 1 && visited[q] == 0) {
+              visited[q] = 1;
+              stack.add(q);
+            }
+          }
+        }
+      }
+      // מהליבה חזרה לגודל-הגוש האמיתי (השחיקה הורידה blobRadius מכל צד).
+      final bw = maxX - minX + 1 + 2 * blobRadius;
+      final bh = maxY - minY + 1 + 2 * blobRadius;
+      final diam = max(bw, bh);
+      final aspect = max(bw, bh) / min(bw, bh);
+      final coreFill =
+          size / ((maxX - minX + 1) * (maxY - minY + 1)).toDouble();
+      if (diam >= 2 * strokeW &&
+          diam <= 12 * strokeW &&
+          aspect <= 1.4 &&
+          coreFill >= 0.5 &&
+          coreFill <= 0.92) {
+        out.add(_Cluster(sx / size, sy / size, size));
+      }
+    }
+    return out;
+  }
+
+  /// כיכרות-טבעת: רכיבי-רקע (אפסים) כלואים שאינם נוגעים בשולי התמונה,
+  /// בגודל-כיכר וצורה עגלגלה.
+  static List<_Cluster> _roundIslands(
+    Uint8List m,
+    int w,
+    int h,
+    int strokeW,
+  ) {
+    final out = <_Cluster>[];
+    final visited = Uint8List(w * h);
+    final stack = <int>[];
+    final minA = 2.25 * strokeW * strokeW; // (1.5·strokeW)²
+    final maxA = 64.0 * strokeW * strokeW; // (8·strokeW)²
+    for (var start = 0; start < m.length; start++) {
+      if (m[start] == 1 || visited[start] == 1) continue;
+      var size = 0, sx = 0, sy = 0;
+      var minX = w, maxX = 0, minY = h, maxY = 0;
+      var touchesBorder = false;
+      stack.add(start);
+      visited[start] = 1;
+      while (stack.isNotEmpty) {
+        final p = stack.removeLast();
+        final x = p % w, y = p ~/ w;
+        size++;
+        sx += x;
+        sy += y;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        if (x == 0 || y == 0 || x == w - 1 || y == h - 1) {
+          touchesBorder = true;
+        }
+        // 4-שכנות — שלא "נזלוג" באלכסון דרך פינת-דרך.
+        for (final q in [p - 1, p + 1, p - w, p + w]) {
+          if (q < 0 || q >= m.length) continue;
+          if ((q == p - 1 && x == 0) || (q == p + 1 && x == w - 1)) continue;
+          if (m[q] == 0 && visited[q] == 0) {
+            visited[q] = 1;
+            stack.add(q);
+          }
+        }
+      }
+      if (touchesBorder || size < minA || size > maxA) continue;
+      final bw = maxX - minX + 1, bh = maxY - minY + 1;
+      final aspect = max(bw, bh) / min(bw, bh);
+      final fill = size / (bw * bh);
+      if (aspect <= 1.7 && fill >= 0.55) {
+        out.add(_Cluster(sx / size, sy / size, size));
+      }
+    }
+    return out;
+  }
+
+  /// עיקולים חדים: לכל פיקסל-מסלול בשלד (2 מעברים) הולכים k צעדים לשני
+  /// הכיוונים ומודדים את הזווית בין הזרועות — ישר ≈ 180°, עיקול חד < 135°.
+  /// עיקול בקרבת צומת נפסל (זרועות הצומת יוצרות זוויות ממילא).
+  static List<_Cluster> _findBends(
+    Uint8List skel,
+    int w,
+    int h,
+    List<int> junctionPts,
+    int strokeW,
+  ) {
+    const kSteps = 9;
+    const margin = 16;
+    final minJuncDist = (strokeW * 2.5).round();
+    final bendPts = <int>[];
+
+    // מפת-קרבה לצמתים — בדיקה מהירה במקום מרחק לכל צומת.
+    Uint8List? nearJunction;
+    if (junctionPts.isNotEmpty) {
+      nearJunction = Uint8List(w * h);
+      for (final p in junctionPts) {
+        nearJunction[p] = 1;
+      }
+      nearJunction = _dilate(nearJunction, w, h, minJuncDist);
+    }
+
+    // שני השכנים של פיקסל-מסלול; null אם אין בדיוק 2.
+    (int, int)? pathNeighbors(int p) {
+      final x = p % w, y = p ~/ w;
+      int? a, b;
+      for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+          if (dx == 0 && dy == 0) continue;
+          final q = (y + dy) * w + (x + dx);
+          if (skel[q] == 0) continue;
+          if (a == null) {
+            a = q;
+          } else if (b == null) {
+            b = q;
+          } else {
+            return null;
+          }
+        }
+      }
+      return (a == null || b == null) ? null : (a, b);
+    }
+
+    // הליכה לאורך השלד מ-p דרך first, עד k צעדים; null אם המסלול נגמר.
+    int? walk(int p, int first) {
+      var prev = p, cur = first;
+      for (var i = 1; i < kSteps; i++) {
+        final n = pathNeighbors(cur);
+        if (n == null) return null; // צומת/קצה — לא מודדים דרכו
+        final next = n.$1 == prev ? n.$2 : n.$1;
+        prev = cur;
+        cur = next;
+      }
+      return cur;
+    }
+
+    for (var y = margin; y < h - margin; y++) {
+      final row = y * w;
+      for (var x = margin; x < w - margin; x++) {
+        final p = row + x;
+        if (skel[p] == 0) continue;
+        if (nearJunction != null && nearJunction[p] == 1) continue;
+        final n = pathNeighbors(p);
+        if (n == null) continue;
+        final a = walk(p, n.$1);
+        final b = walk(p, n.$2);
+        if (a == null || b == null) continue;
+        final v1x = (a % w - x).toDouble(), v1y = (a ~/ w - y).toDouble();
+        final v2x = (b % w - x).toDouble(), v2y = (b ~/ w - y).toDouble();
+        final dot = v1x * v2x + v1y * v2y;
+        final norm = sqrt(v1x * v1x + v1y * v1y) * sqrt(v2x * v2x + v2y * v2y);
+        if (norm == 0) continue;
+        final angleDeg = acos((dot / norm).clamp(-1.0, 1.0)) * 180 / pi;
+        if (angleDeg < 135) bendPts.add(p);
+      }
+    }
+    return _cluster(bendPts, w, 16);
   }
 
   /// אומד את רוחב-המשיחה האופייני של המסכה: דוגם רשת נקודות, מודד לכל
@@ -476,7 +746,7 @@ class RoadJunctionDetector {
       final bboxArea = (maxX - minX + 1) * (maxY - minY + 1);
       final solidity = comp.length / bboxArea;
       if (comp.length < minSize ||
-          (comp.length > 3000 && solidity > maxSolidity)) {
+          (comp.length > minSize && solidity > maxSolidity)) {
         for (final p in comp) {
           m[p] = 0;
         }
@@ -622,4 +892,14 @@ class _Cluster {
   final double cx, cy;
   final int weight;
   _Cluster(this.cx, this.cy, this.weight);
+}
+
+/// תוצאת ענף אחד של הצנרת — מאפיינים לפי סוג.
+class _BranchResult {
+  final List<_Cluster> junctions, deadEnds, bends, roundabouts;
+  const _BranchResult(
+      this.junctions, this.deadEnds, this.bends, this.roundabouts);
+
+  static const empty =
+      _BranchResult(<_Cluster>[], <_Cluster>[], <_Cluster>[], <_Cluster>[]);
 }

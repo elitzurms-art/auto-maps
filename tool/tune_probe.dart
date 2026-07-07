@@ -19,6 +19,10 @@ void main(List<String> args) {
   print('image ${im.width}x${im.height}');
   final sw = Stopwatch()..start();
   final found = RoadJunctionDetector.detect(im, debugDir: debugDir);
-  print('candidates: ${found.length} in ${sw.elapsedMilliseconds}ms');
+  final byKind = <MapFeatureKind, int>{};
+  for (final f in found) {
+    byKind[f.kind] = (byKind[f.kind] ?? 0) + 1;
+  }
+  print('candidates: ${found.length} in ${sw.elapsedMilliseconds}ms  $byKind');
   print(File('$debugDir/00_info.txt').readAsStringSync());
 }

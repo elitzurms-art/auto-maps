@@ -49,6 +49,12 @@ void main() {
         color: ink, thickness: 2);
   }
 
+  // כיכר-טבעת מחוברת לרשת: טבעת דרך סביב אי-רקע עגול
+  img.fillCircle(map, x: 1000, y: 480, radius: 34, color: road);
+  img.fillCircle(map, x: 1000, y: 480, radius: 18,
+      color: img.ColorRgb8(235, 235, 230));
+  thickLine(1000, 514, 1000, 700); // חיבור לרשת שלא תימחק כרכיב מוצק
+
   // תיבת-מקרא מלאה (כחול כהה + טקסט לבן) — אסור שייצאו ממנה מועמדים
   img.fillRect(map, x1: 80, y1: 800, x2: 420, y2: 950,
       color: img.ColorRgb8(20, 90, 180));
@@ -56,20 +62,26 @@ void main() {
       color: img.ColorRgb8(255, 255, 255));
 
   final sw = Stopwatch()..start();
-  final found = RoadJunctionDetector.detect(map);
+  final found = RoadJunctionDetector.detect(map, debugDir: Platform.environment["PROBE_DEBUG"]);
   sw.stop();
 
   var legendNoise = 0;
   for (final f in found) {
-    if (f.x >= 70 && f.x <= 430 && f.y >= 790 && f.y <= 960) legendNoise++;
+    if (f.pos.x >= 70 && f.pos.x <= 430 && f.pos.y >= 790 && f.pos.y <= 960) {
+      legendNoise++;
+    }
   }
   print('legend-box noise: $legendNoise (must be 0)');
 
+  final junctions = [
+    for (final f in found)
+      if (f.kind == MapFeatureKind.junction) f.pos,
+  ];
   var failures = 0;
   for (final t in truth) {
-    final best = found.isEmpty
+    final best = junctions.isEmpty
         ? double.infinity
-        : found
+        : junctions
             .map((f) => sqrt(pow(f.x - t.x, 2) + pow(f.y - t.y, 2)))
             .reduce(min);
     if (best > 12) {
@@ -77,21 +89,37 @@ void main() {
       print('MISS junction (${t.x},${t.y}) — nearest candidate ${best.toStringAsFixed(1)}px away');
     }
   }
-  // רעש: מועמדים רחוקים מכל צומת-אמת ומחוץ לאלכסון
+  // רעש: צמתים רחוקים מכל צומת-אמת ומחוץ לאלכסון
   var noise = 0;
-  for (final f in found) {
+  for (final f in junctions) {
     final nearTruth = truth
         .map((t) => sqrt(pow(f.x - t.x, 2) + pow(f.y - t.y, 2)))
         .reduce(min);
     // על האלכסון (300,700)->(750,250) קצוות נחשבים צמתים אמיתיים
     if (nearTruth > 40) noise++;
   }
+  final byKind = <MapFeatureKind, int>{};
+  for (final f in found) {
+    byKind[f.kind] = (byKind[f.kind] ?? 0) + 1;
+  }
   print('found ${found.length} candidates in ${sw.elapsedMilliseconds}ms; '
-      'noise(far-from-truth)=$noise');
+      'noise(far-from-truth junctions)=$noise; kinds=$byKind');
+  // הדרכים מסתיימות ב-(x,60)/(x,940) — חייבים קצוות-דרך
+  final deadEnds = byKind[MapFeatureKind.deadEnd] ?? 0;
+  if (deadEnds == 0) print('WARN: no dead-ends detected');
+  // כיכר-הטבעת ב-(1000,480) חייבת להתגלות במרחק ≤12px מהמרכז
+  final rb = [
+    for (final f in found)
+      if (f.kind == MapFeatureKind.roundabout) f.pos,
+  ];
+  final rbHit = rb.any(
+      (r) => sqrt(pow(r.x - 1000, 2) + pow(r.y - 480, 2)) <= 12);
+  print(rbHit ? 'roundabout FOUND at center' : 'ROUNDABOUT MISSED');
+  if (!rbHit) failures++;
 
   // פלט ויזואלי
   for (final f in found) {
-    img.drawCircle(map, x: f.x.round(), y: f.y.round(), radius: 10,
+    img.drawCircle(map, x: f.pos.x.round(), y: f.pos.y.round(), radius: 10,
         color: img.ColorRgb8(200, 0, 200));
   }
   final out =

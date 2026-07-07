@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 
+import '../services/input_image_service.dart';
 import '../services/livemaps_export_service.dart';
 import '../services/world_file_parser_service.dart';
 import 'georeference_screen.dart';
@@ -48,16 +49,130 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _pickImage() async {
     final res = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'],
-      dialogTitle: 'בחר תמונת מפה לג\'יאורפרנס',
+      allowedExtensions: InputImageService.pickerExtensions,
+      dialogTitle: 'בחר מפה לג\'יאורפרנס (תמונה / PDF)',
     );
     final path = res?.files.single.path;
     if (path == null) return;
-    setState(() {
-      _imagePath = path;
-      _outcome = null;
-    });
-    await _openGeoreference(path);
+    await _loadInput(path);
+  }
+
+  /// נרמול הקלט (רינדור PDF / המרת TIFF) ופתיחת מסך הנעיצה.
+  /// TIFF עם ג'יאורפרנס מובנה (GeoTIFF) מזוהה אוטומטית ומדלג על הנעיצה.
+  Future<void> _loadInput(String path) async {
+    try {
+      final ext = p.extension(path).toLowerCase();
+      if (ext == '.tif' || ext == '.tiff') {
+        final geo = await _tryParseGeoTiff(path);
+        if (geo != null) {
+          setState(() {
+            _imagePath = geo.pngPath;
+            _outcome = GeoreferenceOutcome(
+              result: geo.result,
+              transform: 'affine',
+            );
+          });
+          if (!mounted) return;
+          ScaffoldMessenger.of(context)
+            ..clearSnackBars()
+            ..showSnackBar(
+              SnackBar(
+                content: Text(
+                  'זוהה GeoTIFF עם ג\'יאורפרנס מובנה '
+                  '(${geo.result.detectedCrs}) — מוכן לייצוא. '
+                  'אפשר גם לערוך נעיצה ידנית.',
+                ),
+                duration: const Duration(seconds: 6),
+              ),
+            );
+          return;
+        }
+      }
+
+      var pdfPage = 1;
+      if (InputImageService.isPdf(path)) {
+        final pages = await InputImageService.pdfPageCount(path);
+        if (pages > 1) {
+          if (!mounted) return;
+          final sel = await _askPdfPage(pages);
+          if (sel == null) return;
+          pdfPage = sel;
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+            ..clearSnackBars()
+            ..showSnackBar(
+              const SnackBar(content: Text('מרנדר את עמוד ה-PDF...')),
+            );
+        }
+      }
+      final display = await InputImageService.normalize(
+        path,
+        pdfPage: pdfPage,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).clearSnackBars();
+      setState(() {
+        _imagePath = display;
+        _outcome = null;
+      });
+      await _openGeoreference(display);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(content: Text('טעינת הקובץ נכשלה: $e')));
+    }
+  }
+
+  /// מנסה לפרסר TIFF כ-GeoTIFF; null כשאין תגי-ג'יאורפרנס (TIFF רגיל).
+  Future<({WorldFileResult result, String pngPath})?> _tryParseGeoTiff(
+    String path,
+  ) async {
+    try {
+      return await WorldFileParserService().parseGeoTiff(tiffPath: path);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// בחירת עמוד ב-PDF מרובה-עמודים.
+  Future<int?> _askPdfPage(int pages) async {
+    final ctrl = TextEditingController(text: '1');
+    final sel = await showDialog<int>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: Text('ל-PDF יש $pages עמודים'),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+              labelText: 'איזה עמוד לרנדר? (1-$pages)',
+              border: const OutlineInputBorder(),
+            ),
+            onSubmitted: (v) =>
+                Navigator.pop(ctx, int.tryParse(v.trim())?.clamp(1, pages)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('ביטול'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(
+                ctx,
+                int.tryParse(ctrl.text.trim())?.clamp(1, pages) ?? 1,
+              ),
+              child: const Text('רנדר'),
+            ),
+          ],
+        ),
+      ),
+    );
+    return sel;
   }
 
   Future<void> _openGeoreference(String path) async {

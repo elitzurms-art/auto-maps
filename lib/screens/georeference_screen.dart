@@ -95,8 +95,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   bool _aiBusy = false;
   bool _warping = false;
 
-  // צמתים מהגלאי המקומי (עיבוד-תמונה, בלי AI) — לחיצה על סמן נועצת נקודה.
-  List<Offset> _cvCandidates = [];
+  // מאפיינים מהגלאי המקומי (עיבוד-תמונה, בלי AI): צמתים, קצוות-דרך,
+  // מבנים, עיקולים — לחיצה על סמן נועצת נקודה.
+  List<({Offset pos, String label})> _cvCandidates = [];
   bool _cvBusy = false;
 
   @override
@@ -268,7 +269,13 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           await RoadJunctionDetector.detectFileInIsolate(widget.imagePath);
       if (!mounted) return;
       setState(() {
-        _cvCandidates = [for (final c in pts) Offset(c.x, c.y)];
+        _cvCandidates = [
+          for (final c in pts)
+            (
+              pos: Offset(c.pos.x, c.pos.y),
+              label: RoadJunctionDetector.kindLabel(c.kind),
+            ),
+        ];
       });
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
@@ -276,8 +283,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           SnackBar(
             content: Text(
               pts.isEmpty
-                  ? 'לא אותרו צמתים בעיבוד-תמונה (ניגודיות חלשה?)'
-                  : 'אותרו ${pts.length} צמתים (עיבוד מקומי, בלי AI) — '
+                  ? 'לא אותרו מאפיינים בעיבוד-תמונה (ניגודיות חלשה?)'
+                  : 'אותרו ${pts.length} מאפיינים (עיבוד מקומי, בלי AI) — '
                         'לחיצה על סמן כחלחל נועצת שם נקודה',
             ),
             duration: const Duration(seconds: 5),
@@ -293,30 +300,34 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     }
   }
 
-  /// סמני צמתי-הגלאי (טורקיז) על התמונה; לחיצה נועצת נקודה בפיקסל המדויק.
+  /// סמני מאפייני-הגלאי (טורקיז) על התמונה; לחיצה נועצת נקודה בפיקסל
+  /// המדויק, ריחוף מציג את הסוג (צומת / קצה דרך / מבנה / עיקול).
   List<Widget> _buildCvMarkers() {
     final scale = _displayScale;
     return _cvCandidates.map((c) {
       return Positioned(
-        left: c.dx * scale - 10,
-        top: c.dy * scale - 10,
+        left: c.pos.dx * scale - 10,
+        top: c.pos.dy * scale - 10,
         child: GestureDetector(
-          onTap: () => _pickOnImage(c),
-          child: Container(
-            width: 20,
-            height: 20,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.teal.withValues(alpha: 0.25),
-              border: Border.all(color: Colors.teal, width: 2),
-            ),
-            child: Center(
-              child: Container(
-                width: 4,
-                height: 4,
-                decoration: const BoxDecoration(
-                  color: Colors.teal,
-                  shape: BoxShape.circle,
+          onTap: () => _pickOnImage(c.pos),
+          child: Tooltip(
+            message: c.label,
+            child: Container(
+              width: 20,
+              height: 20,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.teal.withValues(alpha: 0.25),
+                border: Border.all(color: Colors.teal, width: 2),
+              ),
+              child: Center(
+                child: Container(
+                  width: 4,
+                  height: 4,
+                  decoration: const BoxDecoration(
+                    color: Colors.teal,
+                    shape: BoxShape.circle,
+                  ),
                 ),
               ),
             ),

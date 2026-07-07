@@ -105,7 +105,19 @@ add_custom_command(TARGET auto_maps_ecw POST_BUILD
         ${PROJ_DB} ${ECW_RUNNER_DIR}/proj_data/
     COMMENT "Copying GDAL data + proj.db to runner/$<CONFIG>/")
 
+# ── ממיר WIC ‏(HEIC→PNG) — DLL עצמאי קטן, בלי שום תלות ב-GDAL ──
+add_library(auto_maps_wic SHARED ${CMAKE_CURRENT_SOURCE_DIR}/wic_convert.cpp)
+target_link_libraries(auto_maps_wic PRIVATE windowscodecs ole32)
+set_target_properties(auto_maps_wic PROPERTIES OUTPUT_NAME "auto_maps_wic")
+add_custom_command(TARGET auto_maps_wic POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${ECW_RUNNER_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:auto_maps_wic> ${ECW_RUNNER_DIR}/
+    COMMENT "Copying auto_maps_wic.dll to runner/$<CONFIG>/")
+
 # ── Install rules (cmake --install / release packaging) ──
+install(TARGETS auto_maps_wic RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
+    COMPONENT Runtime)
 install(TARGETS auto_maps_ecw RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
     COMPONENT Runtime)
 foreach(dll ${GDAL_RUNTIME_DLLS})
