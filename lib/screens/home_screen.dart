@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
 
 import '../services/ai_engine.dart';
+import '../services/gemini_anchor_service.dart';
 import '../services/geo_export_service.dart';
 import '../services/input_image_service.dart';
 import '../services/livemaps_export_service.dart';
@@ -134,6 +135,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final urlCtrl = TextEditingController(text: await AiEngine.ollamaUrl());
     final modelCtrl =
         TextEditingController(text: await AiEngine.ollamaModel());
+    final keyCtrl =
+        TextEditingController(text: await GeminiAnchorService.getApiKey() ?? '');
     if (!mounted) return;
     final saved = await showDialog<bool>(
       context: context,
@@ -153,6 +156,18 @@ class _HomeScreenState extends State<HomeScreen> {
                   title: const Text('Gemini (ענן)'),
                   subtitle: const Text('דורש מפתח API; מדויק יותר'),
                 ),
+                if (engine == AiEngine.gemini) ...[
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: keyCtrl,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'מפתח Gemini API',
+                      hintText: 'aistudio.google.com/apikey',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
                 RadioListTile<String>(
                   value: AiEngine.ollama,
                   groupValue: engine,
@@ -203,6 +218,9 @@ class _HomeScreenState extends State<HomeScreen> {
       await AiEngine.setEngine(engine);
       await AiEngine.setOllamaUrl(urlCtrl.text);
       await AiEngine.setOllamaModel(modelCtrl.text);
+      if (keyCtrl.text.trim().isNotEmpty) {
+        await GeminiAnchorService.setApiKey(keyCtrl.text.trim());
+      }
     }
   }
 
@@ -361,6 +379,8 @@ class _HomeScreenState extends State<HomeScreen> {
         final tif = await GeoExportService.writeGeoTiff(
           pngPath: pngPath,
           corners: corners,
+          imageWidth: outcome.result.imageWidth,
+          imageHeight: outcome.result.imageHeight,
           tifPath: p.join(params.targetDir, '$base.tif'),
         );
         written.add(p.basename(tif));

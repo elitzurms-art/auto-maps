@@ -93,16 +93,21 @@ class GeoExportService {
   /// GeoTIFF זמין (דורש את GDAL המצורף).
   static bool get geoTiffSupported => GdalWarpService.isSupportedPlatform;
 
-  /// כותב GeoTIFF (WGS84, מיושר-צפון) מ-[pngPath]. מחזיר את נתיב ה-TIF.
+  /// כותב GeoTIFF (WGS84, עם geotransform מלא — תומך בסיבוב) מ-[pngPath].
+  /// מחזיר את נתיב ה-TIF.
   static Future<String> writeGeoTiff({
     required String pngPath,
     required List<LatLng> corners,
+    required int imageWidth,
+    required int imageHeight,
     required String tifPath,
   }) async {
     await GdalWarpService.writeGeoTiff(
       srcImagePath: pngPath,
       dstTiffPath: tifPath,
       corners: corners,
+      imageWidth: imageWidth,
+      imageHeight: imageHeight,
     );
     return tifPath;
   }

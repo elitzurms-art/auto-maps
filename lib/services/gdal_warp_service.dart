@@ -28,12 +28,10 @@ typedef _WarpTpsDart =
       Pointer<Int32> outSize2,
     );
 
-typedef _GeoTiffNative =
-    Int32 Function(Pointer<Utf8> src, Pointer<Utf8> dst, Double ulx, Double uly,
-        Double lrx, Double lry);
-typedef _GeoTiffDart =
-    int Function(Pointer<Utf8> src, Pointer<Utf8> dst, double ulx, double uly,
-        double lrx, double lry);
+typedef _GeoTiffNative = Int32 Function(
+    Pointer<Utf8> src, Pointer<Utf8> dst, Pointer<Double> gt6);
+typedef _GeoTiffDart = int Function(
+    Pointer<Utf8> src, Pointer<Utf8> dst, Pointer<Double> gt6);
 
 /// תוצאת יישור TPS — הרסטר המיושר (PNG חדש) + הפינות/מימדים שלו.
 class TpsWarpResult {
@@ -112,47 +110,53 @@ class GdalWarpService {
     );
   }
 
-  /// כותב GeoTIFF (WGS84, מיושר-צפון) מ-[srcImagePath] תוך הקצאת פינות.
-  /// [corners] בסדר NW, NE, SE, SW. משתמש ב-`ecw_write_geotiff` (‏GDAL
-  /// Translate ‎-a_ullr). מיושר-צפון: מתאים למצב north-up ולפלט TPS.
+  /// כותב GeoTIFF (WGS84) מ-[srcImagePath] עם geotransform מלא הנגזר מ-4
+  /// הפינות — **תומך בסיבוב**. [corners] בסדר NW, NE, SE, SW; [imageWidth]/
+  /// [imageHeight] הם ממדי-הרסטר (חייבים להתאים ל-srcImagePath). למפה
+  /// מיושרת-צפון איברי-הסיבוב יוצאים 0 → זהה למיושר-צפון.
   static Future<void> writeGeoTiff({
     required String srcImagePath,
     required String dstTiffPath,
     required List<LatLng> corners,
+    required int imageWidth,
+    required int imageHeight,
   }) async {
     if (!isSupportedPlatform) {
       throw UnsupportedError(
         'ייצוא GeoTIFF דורש את GDAL המצורף (Windows/Android/iOS בלבד)',
       );
     }
-    final nw = corners[0], se = corners[2];
-    final ulx = nw.longitude, uly = nw.latitude;
-    final lrx = se.longitude, lry = se.latitude;
-    await Isolate.run(
-      () => _geoTiffInIsolate(srcImagePath, dstTiffPath, ulx, uly, lrx, lry),
-    );
+    final nw = corners[0], ne = corners[1], sw = corners[3];
+    final w = imageWidth.toDouble(), h = imageHeight.toDouble();
+    // geotransform בסדר GDAL: {originX, pxW, rowRot, originY, colRot, pxH}.
+    // world = gt0 + px·gt1 + py·gt2 (lon) ; gt3 + px·gt4 + py·gt5 (lat).
+    final gt = <double>[
+      nw.longitude,
+      (ne.longitude - nw.longitude) / w,
+      (sw.longitude - nw.longitude) / h,
+      nw.latitude,
+      (ne.latitude - nw.latitude) / w,
+      (sw.latitude - nw.latitude) / h,
+    ];
+    await Isolate.run(() => _geoTiffInIsolate(srcImagePath, dstTiffPath, gt));
   }
 
-  static void _geoTiffInIsolate(
-    String src,
-    String dst,
-    double ulx,
-    double uly,
-    double lrx,
-    double lry,
-  ) {
+  static void _geoTiffInIsolate(String src, String dst, List<double> gt) {
     final lib = openEcwLibrary();
     final fn = lib.lookupFunction<_GeoTiffNative, _GeoTiffDart>(
       'ecw_write_geotiff',
     );
     final srcP = src.toNativeUtf8();
     final dstP = dst.toNativeUtf8();
+    final gtP = malloc<Double>(6);
     try {
-      final rc = fn(srcP, dstP, ulx, uly, lrx, lry);
+      gtP.asTypedList(6).setAll(0, gt);
+      final rc = fn(srcP, dstP, gtP);
       if (rc != 0) throw Exception('ייצוא GeoTIFF נכשל (קוד $rc)');
     } finally {
       malloc.free(srcP);
       malloc.free(dstP);
+      malloc.free(gtP);
     }
   }
 

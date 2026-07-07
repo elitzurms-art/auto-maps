@@ -265,6 +265,27 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
     return LatLng(lat / act.length, lon / act.length);
   }
 
+  /// שכבת-הבלנד: `RotatedOverlayImage` מ-3 הפינות האמיתיות → מסתובב נכון
+  /// למפה מסובבת. למפה מיושרת-צפון הפינות ישרות → זהה ל-OverlayImage.
+  BaseOverlayImage _blendOverlay(WorldFileResult prov) {
+    final provider = FileImage(File(widget.imagePath));
+    final c = prov.cornersWgs84;
+    if (c != null && c.length == 4) {
+      return RotatedOverlayImage(
+        topLeftCorner: c[0], // NW
+        bottomLeftCorner: c[3], // SW
+        bottomRightCorner: c[2], // SE
+        imageProvider: provider,
+        opacity: _opacity,
+      );
+    }
+    return OverlayImage(
+      bounds: LatLngBounds(prov.southWest, prov.northEast),
+      imageProvider: provider,
+      opacity: _opacity,
+    );
+  }
+
   /// מטיל פיקסל-סריקה לעולם לפי ה-affine הנוכחי (אינטרפולציה בי-לינארית
   /// של 4 הפינות) — מראה **היכן הסריקה נוחתת** מול המיקום ב-OSM.
   LatLng? _projectScan(Offset px, WorldFileResult prov) {
@@ -476,18 +497,7 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                     ? const SatelliteOnlineSource().buildTileLayer()
                     : widget.refMap.buildActiveTileLayer(),
                 if (prov != null)
-                  OverlayImageLayer(
-                    overlayImages: [
-                      OverlayImage(
-                        bounds: LatLngBounds(
-                          prov.southWest,
-                          prov.northEast,
-                        ),
-                        imageProvider: FileImage(File(widget.imagePath)),
-                        opacity: _opacity,
-                      ),
-                    ],
-                  ),
+                  OverlayImageLayer(overlayImages: [_blendOverlay(prov)]),
                 // קווי-שגיאה: מחברים "היכן הסריקה נוחתת" ל"מיקום ב-OSM".
                 if (prov != null)
                   PolylineLayer(

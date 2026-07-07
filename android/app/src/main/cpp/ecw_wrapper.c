@@ -49,6 +49,8 @@ extern int GDALGetRasterYSize(GDALDatasetH);
 extern int GDALGetRasterCount(GDALDatasetH);
 extern const char *GDALGetProjectionRef(GDALDatasetH);
 extern int GDALGetGeoTransform(GDALDatasetH, double *padfTransform); // 6 doubles
+extern int GDALSetGeoTransform(GDALDatasetH, double *padfTransform); // 6 doubles
+extern int GDALSetProjection(GDALDatasetH, const char *pszProjection); // WKT
 extern void CPLSetConfigOption(const char *pszKey, const char *pszValue);
 extern const char *CPLGetLastErrorMsg(void);
 
@@ -428,36 +430,43 @@ int ecw_warp_tps(const char *src_path, const char *dst_png_path, int gcp_count,
   return 0;
 }
 
-// Write a north-up GeoTIFF (WGS84) from a raster, assigning corner coords via
-// GDALTranslate -a_ullr (no resampling — original pixels + a geotransform).
-// ulx/uly = upper-left (NW) lon/lat, lrx/lry = lower-right (SE) lon/lat.
-// Uses only symbols already in gdal_i.def (no lib/def regen). Returns 0 on OK.
-int ecw_write_geotiff(const char *src_path, const char *dst_path, double ulx,
-                      double uly, double lrx, double lry) {
+// Write a GeoTIFF (WGS84) from a raster with a full 6-param geotransform —
+// supports ROTATION (gt[2]/gt[4] != 0), not only north-up. gt6 in GDAL order:
+// {originX, pxW, rowRot, originY, colRot, pxH(neg)}. Copies the original pixels
+// (no resampling) via GTiff CreateCopy, then stamps the geotransform + WGS84.
+int ecw_write_geotiff(const char *src_path, const char *dst_path,
+                      const double *gt6) {
   ensure_registered();
-  if (!src_path || !dst_path) return -1;
+  if (!src_path || !dst_path || !gt6) return -1;
   GDALDatasetH src = GDALOpen(src_path, /*GA_ReadOnly*/ 0);
   if (!src) {
     LOGE("geotiff: open failed: %s — %s", src_path, CPLGetLastErrorMsg());
     return -2;
   }
-  char s_ulx[64], s_uly[64], s_lrx[64], s_lry[64];
-  snprintf(s_ulx, sizeof(s_ulx), "%.12g", ulx);
-  snprintf(s_uly, sizeof(s_uly), "%.12g", uly);
-  snprintf(s_lrx, sizeof(s_lrx), "%.12g", lrx);
-  snprintf(s_lry, sizeof(s_lry), "%.12g", lry);
-  char *argv[] = {"-of",     "GTiff",     "-a_srs", "EPSG:4326",
-                  "-a_ullr", s_ulx,       s_uly,    s_lrx,
-                  s_lry,     "-co",       "COMPRESS=DEFLATE", NULL};
-  GDALTranslateOptionsH opts = GDALTranslateOptionsNew(argv, NULL);
-  GDALDatasetH out = opts ? GDALTranslate(dst_path, src, opts, NULL) : NULL;
-  if (opts) GDALTranslateOptionsFree(opts);
-  GDALClose(src);
-  if (!out) {
-    LOGE("geotiff: translate failed: %s — %s", dst_path, CPLGetLastErrorMsg());
+  void *drv = GDALGetDriverByName("GTiff");
+  if (!drv) {
+    LOGE("geotiff: GTiff driver missing");
+    GDALClose(src);
     return -3;
   }
+  char *co[] = {"COMPRESS=DEFLATE", NULL};
+  GDALDatasetH out = GDALCreateCopy(drv, dst_path, src, /*bStrict*/ 0, co,
+                                    NULL, NULL);
+  GDALClose(src);
+  if (!out) {
+    LOGE("geotiff: CreateCopy failed: %s — %s", dst_path, CPLGetLastErrorMsg());
+    return -4;
+  }
+  // מטביעים geotransform (כולל סיבוב) + WGS84 על הפלט לפני הסגירה.
+  double gt[6];
+  for (int i = 0; i < 6; i++) gt[i] = gt6[i];
+  GDALSetGeoTransform(out, gt);
+  GDALSetProjection(
+      out,
+      "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,"
+      "298.257223563]],PRIMEM[\"Greenwich\",0],UNIT[\"degree\","
+      "0.0174532925199433]]");
   GDALClose(out);
-  LOGI("geotiff ok: %s", dst_path);
+  LOGI("geotiff ok: %s (rot=%g,%g)", dst_path, gt6[2], gt6[4]);
   return 0;
 }

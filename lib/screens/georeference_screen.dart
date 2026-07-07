@@ -9,7 +9,6 @@ import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-import '../services/ai_engine.dart';
 import '../services/gdal_warp_service.dart';
 import '../services/gemini_anchor_service.dart';
 import '../services/reference_map_controller.dart';
@@ -185,6 +184,27 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     });
   }
 
+  /// שכבת-שילוב של התמונה מעל מפת-הייחוס. `RotatedOverlayImage` מ-3 הפינות
+  /// האמיתיות → מסתובב נכון למפה מסובבת; למיושרת-צפון זהה ל-OverlayImage.
+  BaseOverlayImage _rotatedOverlay(WorldFileResult r, double opacity) {
+    final provider = FileImage(File(widget.imagePath));
+    final c = r.cornersWgs84;
+    if (c != null && c.length == 4) {
+      return RotatedOverlayImage(
+        topLeftCorner: c[0], // NW
+        bottomLeftCorner: c[3], // SW
+        bottomRightCorner: c[2], // SE
+        imageProvider: provider,
+        opacity: opacity,
+      );
+    }
+    return OverlayImage(
+      bounds: LatLngBounds(r.southWest, r.northEast),
+      imageProvider: provider,
+      opacity: opacity,
+    );
+  }
+
   void _calculate() {
     final complete = _points.where((p) => p.isComplete).toList();
     if (complete.length < 3) return;
@@ -259,23 +279,12 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   Future<void> _runAiSuggest() async {
     if (_aiBusy) return;
 
-    // רמז-מיקום קודם (בלי מפתח) — כדי שנוכל לדחות/לוותר על המפתח.
+    // רמז-מיקום **חובה** — עם רמז המסלול הקלאסי רץ בלי שום קריאת-מודל
+    // (Overpass בלבד). Gemini לא מעורב בתהליך הזה; אם המסלול הקלאסי נכשל
+    // וצריך נפילה-חזרה ל-AI — משתמשים במנוע-המקומי (לפי בחירת ⚙), לא ב-Gemini.
     final opts = await _promptAreaHint();
     if (opts == null || !mounted) return;
-
-    // מפתח API נדרש רק במנוע-הענן, ורק כשאין רמז: עם רמז המסלול הקלאסי
-    // רץ בלי שום קריאת-מודל (Overpass בלבד) — אין צורך במפתח. בלי רמז
-    // צריך לקרוא את שם-היישוב/AI, ואז המפתח דרוש. מודל מקומי לא צריך מפתח.
-    var key = '';
-    if (await AiEngine.engine() == AiEngine.gemini) {
-      var k = await GeminiAnchorService.getApiKey() ?? '';
-      if (k.isEmpty && opts.hint.isEmpty) {
-        final entered = await _promptApiKey();
-        if (entered == null || !mounted) return;
-        k = entered;
-      }
-      key = k;
-    }
+    const key = ''; // בלי מפתח Gemini בתהליך הזה
     if (!mounted) return;
 
     setState(() => _aiBusy = true);
@@ -354,54 +363,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     }
   }
 
-  Future<String?> _promptApiKey() async {
-    final ctrl = TextEditingController();
-    final key = await showDialog<String>(
-      context: context,
-      builder: (ctx) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: AlertDialog(
-          title: const Text('מפתח Gemini API'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'להצעת עוגנים אוטומטית נדרש מפתח API של Google '
-                'Gemini (נשמר מקומית במכשיר).\nאפשר להנפיק חינם ב-'
-                'aistudio.google.com/apikey',
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: ctrl,
-                autofocus: true,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'API Key',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('ביטול'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-              child: const Text('שמור'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (key == null || key.isEmpty) return null;
-    await GeminiAnchorService.setApiKey(key);
-    return key;
-  }
-
-  /// דיאלוג רמז-מיקום לפני ההרצה. מחזיר את הטקסט ('' = בלי רמז) או null
-  /// בביטול. הרמז נשמר לפריפיל בהרצה הבאה.
+  /// דיאלוג שם-האזור (חובה) לפני ההרצה. מפתח Gemini מוגדר בהגדרות ⚙ ואינו
+  /// חלק מהתהליך הזה — המסלול הקלאסי רץ עם הרמז בלבד.
   Future<({String hint, bool northUp})?> _promptAreaHint() async {
     final ctrl = TextEditingController(
       text: await GeminiAnchorService.getAreaHint() ?? '',
@@ -414,7 +377,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         textDirection: TextDirection.rtl,
         child: StatefulBuilder(
           builder: (ctx, setDlg) => AlertDialog(
-            title: const Text('רמז מיקום (אופציונלי)'),
+            title: const Text('שם היישוב/האזור'),
             // גלילה — במסך-טלפון עם מקלדת פתוחה התוכן חורג (פס צהוב-שחור).
             content: SingleChildScrollView(
               child: Column(
@@ -422,19 +385,21 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'שם היישוב/האזור של המפה עוזר לאתר את האזור לפני '
-                    'התאמת הנקודות.',
+                    'הזן את שם היישוב/האזור של המפה — דרוש לאיתור האזור '
+                    'ולהתאמה הקלאסית (בלי AI/ענן).',
                   ),
                   const SizedBox(height: 12),
                   TextField(
                     controller: ctrl,
                     autofocus: true,
+                    onChanged: (_) => setDlg(() {}), // לרענון מצב-כפתור "הרץ"
                     decoration: const InputDecoration(
                       labelText: 'למשל: נוב רמת הגולן',
                       border: OutlineInputBorder(),
                     ),
-                    onSubmitted: (v) =>
-                        Navigator.pop(ctx, (hint: v.trim(), northUp: northUp)),
+                    onSubmitted: (v) => v.trim().isEmpty
+                        ? null
+                        : Navigator.pop(ctx, (hint: v.trim(), northUp: northUp)),
                   ),
                   CheckboxListTile(
                     value: northUp,
@@ -457,8 +422,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                 child: const Text('ביטול'),
               ),
               ElevatedButton.icon(
-                onPressed: () => Navigator.pop(
-                    ctx, (hint: ctrl.text.trim(), northUp: northUp)),
+                onPressed: ctrl.text.trim().isEmpty
+                    ? null // רמז חובה
+                    : () => Navigator.pop(
+                        ctx, (hint: ctrl.text.trim(), northUp: northUp)),
                 icon: const Icon(Icons.auto_awesome),
                 label: const Text('הרץ'),
               ),
@@ -583,20 +550,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                                 ? const SatelliteOnlineSource().buildTileLayer()
                                 : _refMap.buildActiveTileLayer(),
                             if (provisional != null)
-                              OverlayImageLayer(
-                                overlayImages: [
-                                  OverlayImage(
-                                    bounds: LatLngBounds(
-                                      provisional.southWest,
-                                      provisional.northEast,
-                                    ),
-                                    imageProvider: FileImage(
-                                      File(widget.imagePath),
-                                    ),
-                                    opacity: overlayOpacity,
-                                  ),
-                                ],
-                              ),
+                              OverlayImageLayer(overlayImages: [
+                                _rotatedOverlay(provisional, overlayOpacity),
+                              ]),
                             MarkerLayer(
                               markers: [
                                 Marker(
@@ -1125,16 +1081,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                   children: [
                     _refMap.buildActiveTileLayer(),
                     OverlayImageLayer(
-                      overlayImages: [
-                        OverlayImage(
-                          bounds: LatLngBounds(
-                            _result!.southWest,
-                            _result!.northEast,
-                          ),
-                          imageProvider: FileImage(File(widget.imagePath)),
-                          opacity: 0.7,
-                        ),
-                      ],
+                      overlayImages: [_rotatedOverlay(_result!, 0.7)],
                     ),
                   ],
                 ),

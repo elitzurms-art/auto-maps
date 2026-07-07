@@ -13,6 +13,8 @@ GDALGetRasterYSize
 GDALGetRasterCount
 GDALGetProjectionRef
 GDALGetGeoTransform
+GDALSetGeoTransform
+GDALSetProjection
 CPLSetConfigOption
 CPLGetLastErrorMsg
 GDALWarpAppOptionsNew

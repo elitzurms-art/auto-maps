@@ -272,18 +272,9 @@ class GeminiAnchorService {
         scanRound.add(c.kind == MapFeatureKind.roundabout);
       }
     }
-    // רמז-אזור אפקטיבי: של המשתמש, או — אם אין — נקרא את שם היישוב
-    // מהמפה (קריאה זולה, גם מודל-מקומי מסוגל). כך המסלול הקלאסי רץ
-    // אוטומטית בלי רמז ובלי ענן.
-    var effectiveHint = areaHint?.trim() ?? '';
-    if (classicalMatchEnabled &&
-        effectiveHint.isEmpty &&
-        junctionPx.length >= 4) {
-      onStatus?.call('קורא את שם היישוב מהמפה ($engineName)...');
-      try {
-        effectiveHint = await _readRegionName(sentJpeg: jpeg, apiKey: apiKey);
-      } catch (_) {}
-    }
+    // המסלול הקלאסי: רמז-אזור (חובה מה-UI) → רישום רשת-כבישים מול OSM,
+    // בלי שום קריאת-מודל. מצליח ⇒ עוגנים מדויקי-פיקסל בלי AI/רשת-ענן.
+    final effectiveHint = areaHint?.trim() ?? '';
     if (classicalMatchEnabled &&
         effectiveHint.isNotEmpty &&
         junctionPx.length >= 4) {
@@ -527,46 +518,6 @@ class GeminiAnchorService {
 
   /// מבקש מהמודל לסמן נקודות בולטות **על התמונה בלבד** ולזהות את שם האזור
   /// מהכיתוב — בלי לנחש קואורדינטות עולם לנקודות.
-  /// קריאה זולה: קורא **רק את שם היישוב** מהכיתוב על המפה (OCR) — משימה
-  /// שגם מודל-מקומי חלש מסוגל לה (בניגוד להתאמה המרחבית שקורסת אצלו).
-  /// מזין את המסלול הקלאסי כשאין רמז מהמשתמש → אוטומציה חינמית בלי ענן.
-  /// מחזיר '' אם לא זוהה שם.
-  Future<String> _readRegionName({
-    required List<int> sentJpeg,
-    required String apiKey,
-  }) async {
-    const prompt = '''
-לפניך תמונת מפה של יישוב/אזור בישראל. קרא **רק** את הכיתוב על המפה
-(כותרת, שם היישוב/המושב/העיר, שלטי-רחובות) והחזר את שם היישוב.
-אל תנחש ואל תתאר — רק את השם המדויק שכתוב. אם אין שם ברור, החזר "".''';
-    final body = {
-      'contents': [
-        {
-          'parts': [
-            {'text': prompt},
-            {
-              'inline_data': {
-                'mime_type': 'image/jpeg',
-                'data': base64Encode(sentJpeg),
-              },
-            },
-          ],
-        },
-      ],
-      'generationConfig': {
-        'response_mime_type': 'application/json',
-        'response_schema': {
-          'type': 'OBJECT',
-          'properties': {'regionName': {'type': 'STRING'}},
-          'required': ['regionName'],
-        },
-      },
-    };
-    final text = await _generate(body, apiKey);
-    final root = jsonDecode(text) as Map<String, dynamic>;
-    return (root['regionName'] as String? ?? '').trim();
-  }
-
   Future<_Extraction> _extractAnchors({
     required List<int> sentJpeg,
     required int sentWidth,
