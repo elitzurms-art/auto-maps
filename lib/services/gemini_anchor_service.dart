@@ -8,6 +8,7 @@ import 'package:image/image.dart' as img;
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'ai_engine.dart';
 import 'road_junction_detector.dart';
 import 'world_file_parser_service.dart';
 
@@ -1370,11 +1371,16 @@ ${sat != null ? 'תמונה 3: תצלום לוויין של **בדיוק אות�
 
   // ═══ קריאת Gemini משותפת ═══
 
-  /// שולח בקשת generateContent ומחזיר את טקסט התשובה (JSON לפי הסכימה).
-  /// על 429 (מכסה/קצב) עובר אוטומטית למודל הבא בשרשרת [_models].
+  /// שולח את הבקשה למנוע הפעיל ומחזיר את טקסט התשובה (JSON לפי הסכימה).
+  /// ‏Gemini: על 429 (מכסה/קצב) עובר אוטומטית למודל הבא בשרשרת [_models].
+  /// מנוע מקומי (Ollama): הבקשה מומרת ונשלחת לשרת המוגדר בהגדרות.
   Future<String> _generate(Map<String, dynamic> body, String apiKey) async {
     // temperature נמוך לכל הקריאות — הצבעות עקביות, פחות "יצירתיות".
     (body['generationConfig'] as Map<String, dynamic>)['temperature'] ??= 0.1;
+
+    if (await AiEngine.engine() == AiEngine.ollama) {
+      return _generateOllama(body);
+    }
 
     http.Response? resp;
     for (var i = _modelIndex; i < _models.length; i++) {
@@ -1424,6 +1430,41 @@ ${sat != null ? 'תמונה 3: תצלום לוויין של **בדיוק אות�
       throw const FormatException('Gemini החזיר תשובה ריקה');
     }
     return text;
+  }
+
+  /// קריאה למודל מקומי דרך Ollama ‏(/api/chat, פלט-מובנה דרך `format`).
+  /// timeout ארוך — מודל-ראייה מקומי עם כמה תמונות יכול לקחת דקות.
+  Future<String> _generateOllama(Map<String, dynamic> body) async {
+    final url = await AiEngine.ollamaUrl();
+    final model = await AiEngine.ollamaModel();
+    final payload = AiEngine.geminiBodyToOllamaChat(body, model);
+    final http.Response resp;
+    try {
+      resp = await http
+          .post(
+            Uri.parse('$url/api/chat'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(payload),
+          )
+          .timeout(const Duration(minutes: 10));
+    } on Exception catch (e) {
+      throw HttpException(
+        'שרת Ollama לא זמין ב-$url ($e) — ודא שהוא רץ ושהמודל "$model" '
+        'מותקן (ollama pull $model)',
+      );
+    }
+    if (resp.statusCode != 200) {
+      throw HttpException(
+        'Ollama החזיר ${resp.statusCode}: ${_apiError(utf8.decode(resp.bodyBytes))}',
+      );
+    }
+    final root = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    final content =
+        (root['message'] as Map<String, dynamic>?)?['content'] as String?;
+    if (content == null || content.isEmpty) {
+      throw const FormatException('Ollama החזיר תשובה ריקה');
+    }
+    return content;
   }
 
   String _apiError(String body) {

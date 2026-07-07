@@ -9,6 +9,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../services/ai_engine.dart';
 import '../services/gdal_warp_service.dart';
 import '../services/gemini_anchor_service.dart';
 import '../services/reference_map_controller.dart';
@@ -341,9 +342,15 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
 
   Future<void> _runAiSuggest() async {
     if (_aiBusy) return;
-    var key = await GeminiAnchorService.getApiKey();
-    key ??= await _promptApiKey();
-    if (key == null || !mounted) return;
+    // מפתח API נדרש רק במנוע-הענן; מודל מקומי (Ollama) לא צריך.
+    var key = '';
+    if (await AiEngine.engine() == AiEngine.gemini) {
+      var k = await GeminiAnchorService.getApiKey();
+      k ??= await _promptApiKey();
+      if (k == null || !mounted) return;
+      key = k;
+    }
+    if (!mounted) return;
 
     // רמז-מיקום — מנחה את איתור האזור (שלב הג'יאוקודינג); null = ביטול.
     final hint = await _promptAreaHint();

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 
+import '../services/ai_engine.dart';
 import '../services/input_image_service.dart';
 import '../services/livemaps_export_service.dart';
 import '../services/world_file_parser_service.dart';
@@ -125,6 +126,84 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  /// הגדרות מנוע-ה-AI: ‏Gemini בענן או מודל מקומי דרך Ollama (גם ברשת).
+  Future<void> _showAiSettings() async {
+    var engine = await AiEngine.engine();
+    final urlCtrl = TextEditingController(text: await AiEngine.ollamaUrl());
+    final modelCtrl =
+        TextEditingController(text: await AiEngine.ollamaModel());
+    if (!mounted) return;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: StatefulBuilder(
+          builder: (ctx, setDlg) => AlertDialog(
+            title: const Text('מנוע AI למצב האוטומטי'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                RadioListTile<String>(
+                  value: AiEngine.gemini,
+                  groupValue: engine,
+                  onChanged: (v) => setDlg(() => engine = v!),
+                  title: const Text('Gemini (ענן)'),
+                  subtitle: const Text('דורש מפתח API; מדויק יותר'),
+                ),
+                RadioListTile<String>(
+                  value: AiEngine.ollama,
+                  groupValue: engine,
+                  onChanged: (v) => setDlg(() => engine = v!),
+                  title: const Text('מודל מקומי (Ollama)'),
+                  subtitle: const Text(
+                    'חינם ופרטי; דורש שרת Ollama עם מודל-ראייה '
+                    '(למשל qwen2.5vl) במחשב הזה או ברשת',
+                  ),
+                ),
+                if (engine == AiEngine.ollama) ...[
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: urlCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'כתובת שרת Ollama',
+                      hintText: AiEngine.defaultOllamaUrl,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: modelCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'שם המודל',
+                      hintText: AiEngine.defaultOllamaModel,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('ביטול'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('שמור'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (saved == true) {
+      await AiEngine.setEngine(engine);
+      await AiEngine.setOllamaUrl(urlCtrl.text);
+      await AiEngine.setOllamaModel(modelCtrl.text);
+    }
+  }
+
   /// מנסה לפרסר TIFF כ-GeoTIFF; null כשאין תגי-ג'יאורפרנס (TIFF רגיל).
   Future<({WorldFileResult result, String pngPath})?> _tryParseGeoTiff(
     String path,
@@ -231,7 +310,16 @@ class _HomeScreenState extends State<HomeScreen> {
     return Directionality(
       textDirection: TextDirection.rtl,
       child: Scaffold(
-        appBar: AppBar(title: const Text('Auto Maps — כלי ג\'יאורפרנס')),
+        appBar: AppBar(
+          title: const Text('Auto Maps — כלי ג\'יאורפרנס'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.settings),
+              tooltip: 'מנוע AI (‏Gemini / מודל מקומי)',
+              onPressed: _showAiSettings,
+            ),
+          ],
+        ),
         body: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 520),
