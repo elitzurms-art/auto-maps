@@ -19,6 +19,11 @@ class AiEngine {
   // 3b — הקל ביותר שרץ על CPU/‏iGPU. במכונה חזקה (M4/GPU) שדרג ל-7b/32b.
   static const defaultOllamaModel = 'qwen2.5vl:3b';
 
+  /// חלון-הקשר. ברירת-המחדל של Ollama (4096) קטנה מדי — שלב ההתאמה שולח
+  /// 3 תמונות (~5600 טוקנים) והאימות אף יותר. 16K מכסה בנוחות ונכנס
+  /// בזיכרון של מודל 3B/7B.
+  static const _numCtx = 16384;
+
   static Future<String> engine() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_engineKey) ?? gemini;
@@ -82,6 +87,7 @@ class AiEngine {
       if (schema != null) 'format': lowerSchemaTypes(schema),
       'options': {
         'temperature': (genCfg['temperature'] as num?) ?? 0.1,
+        'num_ctx': _numCtx,
       },
       'messages': [
         {
