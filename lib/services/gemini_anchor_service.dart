@@ -125,6 +125,12 @@ class GeminiAnchorService {
   static const _verifyZoom = 16;
   static const _verifyCropSize = 640;
 
+  /// ⚠️ מסלול ההתאמה הקלאסי (Overpass+RANSAC) מושבת: רישום-נקודות-בלבד
+  /// אמביגואי על עיר-רשת — נועל לעיתים על פתרון הפוך (~180°) שמתאים
+  /// לענן-הנקודות אך לא לכבישים (אומת ב-tool/match_verify עם שיטוח-על).
+  /// דורש שער-אימות (חפיפת-כבישים) או אילוץ-טופולוגיה לפני הפעלה מחדש.
+  static bool classicalMatchEnabled = false;
+
   /// יעד העוגנים המאומתים: מינימום המסך (4) + רזרבה לדחייה ידנית של המשתמש.
   static const _targetVerified = 5;
 
@@ -240,7 +246,8 @@ class GeminiAnchorService {
         scanRound.add(c.kind == MapFeatureKind.roundabout);
       }
     }
-    if (areaHint != null &&
+    if (classicalMatchEnabled &&
+        areaHint != null &&
         areaHint.trim().isNotEmpty &&
         junctionPx.length >= 4) {
       onStatus?.call('מתאים רשת-כבישים מול OSM (בלי AI)...');

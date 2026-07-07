@@ -107,14 +107,98 @@ Future<void> main(List<String> args) async {
         font: img.arial24, x: x + 8, y: y - 26, color: magenta);
   }
 
-  // הרכבה זו-לצד-זו (מנרמל גובה).
+  // ── פאנל 3: שיטוח (warp) הסריקה על ה-OSM לפי העוגנים — המבחן המכריע:
+  //    אם הכבישים מתיישרים, הסיבוב נכון; אם מסובב, זו אמביגואיות-הסיבוב.
+  //    world→scanPixel affine (least-squares) → inverse-map כל פיקסל-OSM.
+  final n = res.matches.length;
+  // world מקומי (מטרים) סביב מרכז, כמו במַתאם.
+  var lat0 = 0.0, lon0 = 0.0;
+  for (final m in res.matches) {
+    lat0 += m.world.latitude;
+    lon0 += m.world.longitude;
+  }
+  lat0 /= n;
+  lon0 /= n;
+  final mLat = 111320.0, mLon = 111320.0 * cos(lat0 * pi / 180);
+  // פותרים [wx,wy,1]→[px] ו-→[py] ב-least squares (6 מקדמים).
+  final A = <List<double>>[], bx = <double>[], by = <double>[];
+  for (final m in res.matches) {
+    final wx = (m.world.longitude - lon0) * mLon;
+    final wy = (m.world.latitude - lat0) * mLat;
+    A.add([wx, wy, 1]);
+    bx.add(m.pixel.x);
+    by.add(m.pixel.y);
+  }
+  final cx = _lstsq3(A, bx), cy = _lstsq3(A, by);
+  final osmCrop = img.copyResize(right, height: left.height); // כבר יש right
+  // right הנוכחי הוא ה-OSM עם סמנים; נשתמש במקור לפני הסמנים? פשוט
+  // משטחים על עותק שלו.
+  final warp = img.Image.from(right);
+  for (var oy = 0; oy < right.height; oy++) {
+    for (var ox = 0; ox < right.width; ox++) {
+      // פיקסל-OSM → world-mercator → מטרים מקומיים
+      final worldX = x0 + ox * (w / right.width);
+      final worldY = y0 + oy * (h / right.height);
+      final lon = worldX / (256 * (1 << z)) * 360 - 180;
+      final t = pi * (1 - 2 * worldY / (256 * (1 << z)));
+      final lat = atan((exp(t) - exp(-t)) / 2) * 180 / pi;
+      final wx = (lon - lon0) * mLon, wy = (lat - lat0) * mLat;
+      final sx = (cx[0] * wx + cx[1] * wy + cx[2]);
+      final sy = (cy[0] * wx + cy[1] * wy + cy[2]);
+      final rx = sx.round(), ry = sy.round();
+      if (rx < 0 || ry < 0 || rx >= im.width || ry >= im.height) continue;
+      final sp = im.getPixel(rx, ry);
+      final op = warp.getPixel(ox, oy);
+      // blend 50%
+      warp.setPixelRgb(ox, oy, (sp.r + op.r) ~/ 2, (sp.g + op.g) ~/ 2,
+          (sp.b + op.b) ~/ 2);
+    }
+  }
+
+  // הרכבה: סריקה | OSM+סמנים | שיטוח-חופף.
   right = img.copyResize(right, height: left.height);
-  final combo = img.Image(width: left.width + right.width + 20, height: left.height);
+  final warpR = img.copyResize(warp, height: left.height);
+  final combo = img.Image(
+      width: left.width + right.width + warpR.width + 40, height: left.height);
   img.fill(combo, color: img.ColorRgb8(255, 255, 255));
   img.compositeImage(combo, left, dstX: 0, dstY: 0);
   img.compositeImage(combo, right, dstX: left.width + 20, dstY: 0);
+  img.compositeImage(combo, warpR, dstX: left.width + right.width + 40, dstY: 0);
   File(args[5]).writeAsBytesSync(img.encodePng(combo));
-  print('wrote ${args[5]}');
+  print('wrote ${args[5]} (scale=${res.scaleMetersPerPx.toStringAsFixed(3)} '
+      'rot=${res.rotationDeg.toStringAsFixed(1)})');
+}
+
+// least-squares פתרון של A·c = b כאשר A הוא Nx3 (נורמל-משוואות 3x3).
+List<double> _lstsq3(List<List<double>> a, List<double> b) {
+  final ata = List.generate(3, (_) => List.filled(3, 0.0));
+  final atb = List.filled(3, 0.0);
+  for (var r = 0; r < a.length; r++) {
+    for (var i = 0; i < 3; i++) {
+      atb[i] += a[r][i] * b[r];
+      for (var j = 0; j < 3; j++) {
+        ata[i][j] += a[r][i] * a[r][j];
+      }
+    }
+  }
+  // אלימינציית גאוס 3x3
+  for (var i = 0; i < 3; i++) {
+    var piv = ata[i][i];
+    if (piv.abs() < 1e-12) piv = 1e-12;
+    for (var j = 0; j < 3; j++) {
+      ata[i][j] /= piv;
+    }
+    atb[i] /= piv;
+    for (var k = 0; k < 3; k++) {
+      if (k == i) continue;
+      final f = ata[k][i];
+      for (var j = 0; j < 3; j++) {
+        ata[k][j] -= f * ata[i][j];
+      }
+      atb[k] -= f * atb[i];
+    }
+  }
+  return atb;
 }
 
 Future<img.Image?> _tile(int z, int x, int y) async {
