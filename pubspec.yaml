@@ -77,12 +77,33 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
 
+  # ג'נרוט אייקוני-משגר מכל הגדלים מ-assets/logo (dart run flutter_launcher_icons)
+  flutter_launcher_icons: ^0.14.1
+
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
   # activated in the `analysis_options.yaml` file located at the root of your
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+
+# אייקון האפליקציה — מפה + שרביט קסמים (assets/logo/logo.svg הוא המקור).
+# חידוש: לרנדר מחדש את ה-PNG מה-SVG ואז `dart run flutter_launcher_icons`.
+flutter_launcher_icons:
+  image_path: "assets/logo/logo_1024.png"
+  android: true
+  # אייקון אדפטיבי: רקע אחיד + foreground שקוף מכווץ לאזור הבטוח
+  adaptive_icon_background: "#11416B"
+  adaptive_icon_foreground: "assets/logo/logo_fg_1024.png"
+  ios: true
+  remove_alpha_ios: true
+  windows:
+    generate: true
+    image_path: "assets/logo/logo_1024.png"
+    icon_size: 256
+  macos:
+    generate: true
+    image_path: "assets/logo/logo_1024.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

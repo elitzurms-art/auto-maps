@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b5e8f"/>
+      <stop offset="1" stop-color="#0d3352"/>
+    </linearGradient>
+    <linearGradient id="wand" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#3d2b63"/>
+      <stop offset="1" stop-color="#5a3f8f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- רקע אייקון -->
+  <rect x="0" y="0" width="1024" height="1024" rx="190" fill="url(#bg)"/>
+
+  <!-- צל המפה -->
+  <ellipse cx="512" cy="828" rx="330" ry="42" fill="#000" opacity="0.28"/>
+
+  <!-- מפה מקופלת: שלושה פאנלים -->
+  <g stroke="#0d3352" stroke-width="10" stroke-linejoin="round">
+    <polygon points="168,340 396,308 396,776 168,812" fill="#f7f3e6"/>
+    <polygon points="396,308 628,340 628,812 396,776" fill="#e7e0cd"/>
+    <polygon points="628,340 856,308 856,776 628,812" fill="#f7f3e6"/>
+  </g>
+
+  <!-- תוכן המפה -->
+  <g>
+    <!-- פארק ירוק -->
+    <path d="M 190 640 Q 260 560 370 610 L 370 750 Q 260 790 190 760 Z" fill="#9ccf7f"/>
+    <!-- אגם -->
+    <path d="M 700 380 Q 800 360 830 430 Q 840 500 760 510 Q 680 505 680 440 Z" fill="#8fc6e8"/>
+    <!-- דרך ראשית (כתומה) חוצה את הקיפולים -->
+    <path d="M 168 470 Q 320 430 396 480 Q 500 545 628 500 Q 750 465 856 520"
+          fill="none" stroke="#f2a33c" stroke-width="34" stroke-linecap="round"/>
+    <path d="M 168 470 Q 320 430 396 480 Q 500 545 628 500 Q 750 465 856 520"
+          fill="none" stroke="#fff" stroke-width="6" stroke-dasharray="26 22" opacity="0.85"/>
+    <!-- רחובות משניים -->
+    <path d="M 300 320 L 322 700" stroke="#b9b2a0" stroke-width="18" fill="none"/>
+    <path d="M 508 330 L 508 795" stroke="#b9b2a0" stroke-width="18" fill="none"/>
+    <path d="M 730 330 L 748 610" stroke="#b9b2a0" stroke-width="18" fill="none"/>
+    <path d="M 200 600 L 620 585" stroke="#b9b2a0" stroke-width="16" fill="none"/>
+    <!-- נקודות-צומת (הגלאי!) -->
+    <circle cx="311" cy="452" r="16" fill="#18a99c" stroke="#fff" stroke-width="6"/>
+    <circle cx="508" cy="521" r="16" fill="#18a99c" stroke="#fff" stroke-width="6"/>
+    <circle cx="613" cy="590" r="16" fill="#18a99c" stroke="#fff" stroke-width="6"/>
+  </g>
+
+  <!-- שרביט קסמים -->
+  <g>
+    <line x1="330" y1="792" x2="678" y2="404" stroke="#241a3d" stroke-width="52" stroke-linecap="round"/>
+    <line x1="330" y1="792" x2="678" y2="404" stroke="url(#wand)" stroke-width="38" stroke-linecap="round"/>
+    <!-- קצה השרביט -->
+    <line x1="678" y1="404" x2="742" y2="333" stroke="#f6e7b8" stroke-width="38" stroke-linecap="round"/>
+  </g>
+
+  <!-- ניצוצות -->
+  <g fill="#ffd54f">
+    <path d="M 790 258 Q 802 306 850 318 Q 802 330 790 378 Q 778 330 730 318 Q 778 306 790 258 Z"/>
+    <path d="M 884 420 Q 891 448 919 455 Q 891 462 884 490 Q 877 462 849 455 Q 877 448 884 420 Z"/>
+    <path d="M 700 218 Q 705 238 725 243 Q 705 248 700 268 Q 695 248 675 243 Q 695 238 700 218 Z"/>
+  </g>
+  <g fill="#e6c8ff">
+    <path d="M 855 330 Q 858 344 872 347 Q 858 350 855 364 Q 852 350 838 347 Q 852 344 855 330 Z"/>
+    <circle cx="760" cy="430" r="9"/>
+    <circle cx="820" cy="240" r="7"/>
+  </g>
+</svg>
