@@ -182,10 +182,14 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
   /// תיקון גיאומטרי ב' — "הצמד לצומת": מזיז את צד-העולם לצומת-OSM הקרוב
   /// ביותר (עד ~120מ'). מיישר לאמת-הקרקע, לא רק לעקביות-פנימית.
   void _snapToJunction(int i) {
-    if (_osmJunctions.isEmpty) return;
-    final w = _anchors[i].world;
+    final best = _nearestJunction(_anchors[i].world);
+    if (best != null) setState(() => _anchors[i].world = best);
+  }
+
+  LatLng? _nearestJunction(LatLng w, {double maxMeters = 120}) {
+    if (_osmJunctions.isEmpty) return null;
     LatLng? best;
-    var bestD = 120.0; // לא נצמיד לצומת רחוק מדי
+    var bestD = maxMeters;
     for (final j in _osmJunctions) {
       final d = _dist(w, j);
       if (d < bestD) {
@@ -193,7 +197,47 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
         best = j;
       }
     }
-    if (best != null) setState(() => _anchors[i].world = best!);
+    return best;
+  }
+
+  /// יישור-הכל לעקביות: מַצמיד כל עוגן פעיל אל משטח-ה-affine הגלובלי
+  /// (חיזוי מכל הפעילים) — כל השאריות מתאפסות. חישוב-מראש של כל היעדים
+  /// לפני היישום (אחרת כל הזזה משנה את ה-affine של הבא).
+  void _alignAllToConsensus() {
+    final prov = _provisional();
+    if (prov == null) return;
+    final targets = <int, LatLng>{};
+    for (final i in _activeIdx) {
+      final pred = _projectScan(_anchors[i].pixel, prov);
+      if (pred != null) targets[i] = pred;
+    }
+    if (targets.isEmpty) return;
+    setState(() {
+      targets.forEach((i, ll) => _anchors[i].world = ll);
+    });
+    _snack('כל הנקודות יושרו למשטח-העקביות');
+  }
+
+  /// הצמדת-הכל לצומת-OSM הקרוב (עד 120מ'); נקודות רחוקות מכל צומת נשארות.
+  void _snapAllToJunction() {
+    if (_osmJunctions.isEmpty) return;
+    var moved = 0;
+    setState(() {
+      for (final i in _activeIdx) {
+        final best = _nearestJunction(_anchors[i].world);
+        if (best != null) {
+          _anchors[i].world = best;
+          moved++;
+        }
+      }
+    });
+    _snack('$moved נקודות הוצמדו לצומת-OSM הקרוב');
+  }
+
+  void _snack(String msg) {
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
   }
 
   /// affine זמני מהעוגנים הפעילים — לשילוב-השקוף החי.
@@ -632,26 +676,100 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
             ],
           ),
           if (sel == null) ...[
-            // מקרא: מה משמעות שני הסמנים והקו.
+            // רדאר-חשד — סיכום גלובלי בולט.
+            _radarSummary(residuals, threshold),
+            const SizedBox(height: 6),
+            // פעולות-בכמות: יישור-הכל / הצמדת-הכל.
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              alignment: WrapAlignment.center,
+              children: [
+                FilledButton.tonalIcon(
+                  onPressed: _activeIdx.length >= 3 ? _alignAllToConsensus : null,
+                  icon: const Icon(Icons.auto_fix_high, size: 18),
+                  label: const Text('יישר הכל לעקביות'),
+                ),
+                if (_osmJunctions.isNotEmpty)
+                  FilledButton.tonalIcon(
+                    onPressed: _snapAllToJunction,
+                    icon: const Icon(Icons.my_location, size: 18),
+                    label: const Text('הצמד הכל לצומת'),
+                  )
+                else if (_osmLoading)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    child: SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 4),
             Wrap(
               alignment: WrapAlignment.center,
               spacing: 12,
               children: [
                 _legendDot(Colors.blue, 'היכן הסריקה נוחתת', filled: false),
                 _legendDot(Colors.green, 'המיקום ב-OSM'),
-                const Text('· קו = שגיאה',
-                    style: TextStyle(color: Colors.white70, fontSize: 12)),
+                Text(
+                  rejected == 0 ? '· הקש על פין' : '· נפסלו: $rejected',
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
               ],
-            ),
-            const SizedBox(height: 2),
-            Text(
-              rejected == 0
-                  ? 'מאושרות: $approved · הקש על פין לפסילה/הזזה'
-                  : 'מאושרות: $approved · נפסלו: $rejected',
-              style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
           ] else
             _selectedActions(sel, residuals[sel], threshold),
+        ],
+      ),
+    );
+  }
+
+  /// סיכום-הרדאר הגלובלי — באנר בולט: כמה חשודות ומהי העקביות החציונית.
+  Widget _radarSummary(Map<int, double> residuals, double threshold) {
+    if (residuals.isEmpty) {
+      return const Text(
+        'רדאר-חשד: צריך ≥4 נקודות פעילות לחישוב עקביות',
+        style: TextStyle(color: Colors.white54, fontSize: 12),
+      );
+    }
+    final vals = residuals.values.toList()..sort();
+    final median = vals[vals.length ~/ 2].round();
+    final suspects =
+        residuals.entries.where((e) => e.value > threshold).length;
+    final ok = suspects == 0;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: ok
+            ? Colors.green.withValues(alpha: 0.22)
+            : Colors.orange.withValues(alpha: 0.28),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: ok ? Colors.green : Colors.orange,
+          width: 1.5,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(ok ? Icons.verified : Icons.warning_amber,
+              color: ok ? Colors.greenAccent : Colors.orangeAccent, size: 18),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              ok
+                  ? 'רדאר-חשד: כל הנקודות עקביות · חציון $median מ׳'
+                  : '⚠ $suspects נקודות חשודות (כתומות) · חציון $median מ׳',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                fontWeight: ok ? FontWeight.normal : FontWeight.bold,
+              ),
+            ),
+          ),
         ],
       ),
     );
