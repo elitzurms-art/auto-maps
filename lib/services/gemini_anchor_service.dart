@@ -9,6 +9,8 @@ import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'ai_engine.dart';
+import 'anchor_matcher.dart';
+import 'overpass_service.dart';
 import 'road_junction_detector.dart';
 import 'world_file_parser_service.dart';
 
@@ -225,6 +227,33 @@ class GeminiAnchorService {
     final minSep = max(imageWidth, imageHeight) * 0.02;
     _Bbox? bbox;
     String regionLabel = '';
+
+    // ═══ מסלול קלאסי: רישום רשת-כבישים מול OSM (בלי שום קריאת-מודל) ═══
+    // כשיש רמז-אזור והגלאי מצא צמתים — מנסים RANSAC בין צמתי-הסריקה
+    // לצמתי-OSM וקטוריים. מצליח ⇒ עוגנים מדויקי-פיקסל בלי מכסה/רשת-AI.
+    final junctionPx = <Point<double>>[
+      for (final c in cvCandidates)
+        if (c.kind == MapFeatureKind.junction ||
+            c.kind == MapFeatureKind.roundabout)
+          Point(c.pos.x * scaleX, c.pos.y * scaleY),
+    ];
+    if (areaHint != null &&
+        areaHint.trim().isNotEmpty &&
+        junctionPx.length >= 4) {
+      onStatus?.call('מתאים רשת-כבישים מול OSM (בלי AI)...');
+      try {
+        final classical = await _classicalMatch(
+          junctionPx: junctionPx,
+          areaHint: areaHint.trim(),
+        );
+        if (classical != null && classical.length >= 4) {
+          _applyGeometricConsistency(classical, imageWidth, imageHeight);
+          return classical;
+        }
+      } catch (_) {
+        // כשל (רשת/Overpass/אין התאמה) — נופלים חזרה למסלול ה-AI.
+      }
+    }
 
     for (var round = 1; round <= maxRounds; round++) {
       onStatus?.call(
@@ -835,6 +864,52 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
           if (snapped[i] == null) (anchors[i].name, anchors[i].pixel),
       ],
     );
+  }
+
+  // ═══ מסלול קלאסי — רישום רשת-כבישים מול OSM (Overpass + RANSAC) ═══
+
+  /// מתאים את צמתי-הסריקה לצמתי-OSM וקטוריים של האזור. מחזיר עוגנים
+  /// מאומתים (world = קואורדינטת-OSM מדויקת) או null כשההתאמה לא אמינה.
+  Future<List<GeminiAnchorSuggestion>?> _classicalMatch({
+    required List<Point<double>> junctionPx,
+    required String areaHint,
+  }) async {
+    // bbox צמוד ליישוב — ריפוד רחב בולע יישוב שכן עם רשת-כבישים דומה
+    // וגורם להתאמות-שווא (נצפה: נקודות נחתו בחיספין במקום בנוב).
+    final raw = await _geocode(areaHint, settlementOnly: true) ??
+        await _geocode(areaHint, settlementOnly: false);
+    if (raw == null) return null;
+    final dLat = (raw.north - raw.south) * 0.15;
+    final dLon = (raw.east - raw.west) * 0.15;
+    final osm = await OverpassService.fetchJunctions((
+      south: raw.south - dLat,
+      west: raw.west - dLon,
+      north: raw.north + dLat,
+      east: raw.east + dLon,
+    ));
+    if (osm.junctions.length < 4) return null;
+
+    final res = await AnchorMatcher.matchInIsolate(
+      scanPx: junctionPx,
+      refGeo: osm.junctions,
+    );
+    // דורשים יחס-inliers סביר — מגן מפני התאמה-חלקית מקרית.
+    final minReq = max(4, (junctionPx.length * 0.35).round());
+    if (res == null || res.inliers < minReq) return null;
+
+    return [
+      for (final m in res.matches)
+        GeminiAnchorSuggestion(
+          pixel: Offset(m.pixel.x, m.pixel.y),
+          world: m.world,
+          name: 'צומת כבישים',
+          confidence: 1,
+          basis: 'התאמת רשת-כבישים מול OSM',
+          verified: true,
+          verifyNote: 'רישום גיאומטרי (RANSAC, '
+              '${res.inliers} התאמות)',
+        ),
+    ];
   }
 
   // ═══ שלב ב' — איתור האזור (ג'יאוקודינג אמיתי) ═══
