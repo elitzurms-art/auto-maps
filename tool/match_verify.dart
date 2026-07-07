@@ -28,10 +28,10 @@ Future<void> main(List<String> args) async {
     north: double.parse(args[3]),
     east: double.parse(args[4]),
   );
-  final feats = RoadJunctionDetector.detect(im);
+  final det = RoadJunctionDetector.detectFull(im);
   final scan = <Point<double>>[];
   final scanRound = <bool>[];
-  for (final f in feats) {
+  for (final f in det.features) {
     if (f.kind == MapFeatureKind.junction ||
         f.kind == MapFeatureKind.roundabout) {
       scan.add(f.pos);
@@ -44,9 +44,12 @@ Future<void> main(List<String> args) async {
     refGeo: osm.junctions,
     scanRound: scanRound,
     refRound: osm.isRoundabout,
+    scanRoad: det.roadPoints,
+    refRoad: osm.roadPoints,
+    roadGateMeters: 9999, // אבחון: לא לדחות — רוצים לראות את הבחירה
   );
   if (res == null) {
-    print('NO MATCH');
+    print('NO MATCH (road-gate rejected — ambiguous)');
     exitCode = 1;
     return;
   }

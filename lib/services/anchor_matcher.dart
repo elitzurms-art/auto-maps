@@ -40,25 +40,36 @@ class AnchorMatcher {
     required List<LatLng> refGeo,
     List<bool>? scanRound,
     List<bool>? refRound,
+    List<Point<double>>? scanRoad,
+    List<LatLng>? refRoad,
   }) {
     return Isolate.run(() => match(
           scanPx: scanPx,
           refGeo: refGeo,
           scanRound: scanRound,
           refRound: refRound,
+          scanRoad: scanRoad,
+          refRoad: refRoad,
         ));
   }
 
   /// [scanPx] — צמתי-סריקה בפיקסלי-מקור. [refGeo] — צמתי-ייחוס.
-  /// [scanRound]/[refRound] — דגלי-כיכר (אם ניתנים, נאכף כיכר↔כיכר בהקצאה
-  /// הסופית — מונע כיכר↔צומת). מחזיר null כשאין רישום עם [minInliers]+.
+  /// [scanRound]/[refRound] — דגלי-כיכר (נאכף כיכר↔כיכר בהקצאה הסופית).
+  /// [scanRoad]/[refRoad] — נקודות-כביש (סריקה בפיקסלים, ייחוס ב-WGS84):
+  /// כשניתנות, המַתאם **מדרג את מועמדי-ה-RANSAC לפי חפיפת-כבישים** ולא
+  /// לפי ספירת-inliers בלבד — זה שובר את אמביגואיית-הסיבוב (הכבישים אינם
+  /// סימטריים) ומאמת שהרישום נכון. מחזיר null כשאין רישום או כשהחפיפה
+  /// הטובה ביותר גרועה (אמביגואי — עדיף נפילה-חזרה ל-AI).
   static MatchResult? match({
     required List<Point<double>> scanPx,
     required List<LatLng> refGeo,
     List<bool>? scanRound,
     List<bool>? refRound,
+    List<Point<double>>? scanRoad,
+    List<LatLng>? refRoad,
     int minInliers = 4,
-    double inlierMeters = 32,
+    double inlierMeters = 45,
+    double roadGateMeters = 16,
     int iterations = 50000,
     int seed = 12345,
   }) {
@@ -101,9 +112,12 @@ class AnchorMatcher {
 
     final rng = Random(seed);
     final thr2 = inlierMeters * inlierMeters;
-    _C? bestA;
-    _C? bestB;
-    var bestInliers = 0;
+
+    // אוסף עד K מועמדים מובילים לפי inliers (ולא רק את הטוב ביותר) —
+    // כדי לדרג אותם אחר-כך לפי חפיפת-כבישים.
+    const kCand = 25;
+    final cands = <(int, _C, _C)>[]; // (inliers, a, b)
+    var minCandInliers = 0;
 
     for (var iter = 0; iter < iterations; iter++) {
       // זוג-סריקה אקראי; מחפשים זוג-ייחוס באורך תואם לקנה-המידה הצפוי —
@@ -118,7 +132,6 @@ class AnchorMatcher {
       final hi = _lowerBound(refLens, target * 1.3);
       if (hi <= lo) continue;
       final rp = refPairs[lo + rng.nextInt(hi - lo)];
-      // שני הכיוונים של זוג-הייחוס.
       final (j, l) = rng.nextBool() ? (rp.$2, rp.$3) : (rp.$3, rp.$2);
 
       final dz = scan[i] - scan[k];
@@ -138,34 +151,72 @@ class AnchorMatcher {
         }
         if (best <= thr2) inliers++;
       }
-      if (inliers > bestInliers) {
-        bestInliers = inliers;
+      if (inliers >= minInliers &&
+          (cands.length < kCand || inliers > minCandInliers)) {
+        cands.add((inliers, a, b));
+        cands.sort((x, y) => y.$1.compareTo(x.$1));
+        if (cands.length > kCand) cands.removeLast();
+        minCandInliers = cands.last.$1;
+      }
+    }
+
+    if (cands.isEmpty) return null;
+
+    // נקודות-כביש למטרים (אם ניתנו) — לדירוג חפיפת-כבישים.
+    final scanRoadC =
+        scanRoad == null ? null : [for (final p in scanRoad) _C(p.x, p.y)];
+    final refRoadC = refRoad == null
+        ? null
+        : [
+            for (final g in refRoad)
+              _C((g.longitude - lon0) * mPerLon, (g.latitude - lat0) * mPerLat),
+          ];
+    final useRoad = scanRoadC != null &&
+        refRoadC != null &&
+        scanRoadC.length >= 10 &&
+        refRoadC.length >= 10;
+
+    // לכל מועמד: עידון ICP, ואז ניקוד — חפיפת-כבישים (אם יש) או inliers.
+    _C? bestA;
+    _C? bestB;
+    var bestScore = double.infinity; // נמוך=טוב
+    var bestRoadMean = double.infinity;
+    for (final cand in cands) {
+      var a = cand.$2, b = cand.$3;
+      for (var round = 0; round < 3; round++) {
+        final ps = _correspondences(scan, ref, a, b, thr2, scanRound, refRound);
+        if (ps.length < minInliers) break;
+        final fit = _fitSimilarity(
+          [for (final p in ps) scan[p.$1]],
+          [for (final p in ps) ref[p.$2]],
+        );
+        a = fit.$1;
+        b = fit.$2;
+      }
+      double score;
+      double roadMean = 0;
+      if (useRoad) {
+        roadMean = _roadFit(scanRoadC, refRoadC, a, b);
+        score = roadMean; // מטרים ממוצעים לנקודת-כביש — נמוך=מתיישר
+      } else {
+        // בלי כבישים: נשארים על inliers (שלילי כדי ש"נמוך=טוב").
+        final ps = _correspondences(scan, ref, a, b, thr2, scanRound, refRound);
+        score = -ps.length.toDouble();
+      }
+      if (score < bestScore) {
+        bestScore = score;
+        bestRoadMean = roadMean;
         bestA = a;
         bestB = b;
       }
     }
 
-    if (bestA == null || bestInliers < minInliers) return null;
+    if (bestA == null) return null;
+    // שער-אימות: אם אפילו החפיפה הטובה גרועה — הרישום אמביגואי/שגוי,
+    // עדיף להחזיר null (נפילה-חזרה ל-AI) מלהציג עוגנים בזווית הפוכה.
+    if (useRoad && bestRoadMean > roadGateMeters) return null;
 
-    // עידון ICP: least-squares דמיון מכל ה-inliers, כמה סבבים עד התכנסות
-    // — טרנספורמציה מדויקת יותר מפחיתה החלפות בין נקודות סמוכות.
-    var a = bestA, b = bestB!;
-    for (var round = 0; round < 5; round++) {
-      final pairs = _correspondences(scan, ref, a, b, thr2, scanRound, refRound);
-      if (pairs.length < minInliers) break;
-      final fit = _fitSimilarity(
-        [for (final p in pairs) scan[p.$1]],
-        [for (final p in pairs) ref[p.$2]],
-      );
-      if ((fit.$1 - a).abs2 < 1e-9 && (fit.$2 - b).abs2 < 1e-6) {
-        a = fit.$1;
-        b = fit.$2;
-        break; // התכנס
-      }
-      a = fit.$1;
-      b = fit.$2;
-    }
-
+    final a = bestA, b = bestB!;
     // התאמות סופיות 1-1 (חמדני לפי מרחק), עם snap לקואורדינטת-OSM המדויקת.
     final pairs = _correspondences(scan, ref, a, b, thr2, scanRound, refRound);
     final matches = [
@@ -217,6 +268,48 @@ class AnchorMatcher {
       out.add((c.$2, c.$3));
     }
     return out;
+  }
+
+  /// חפיפת-כבישים דו-כיוונית (Chamfer): ממוצע המרחקים סריקה→ייחוס
+  /// **ו**ייחוס→סריקה, קטום ל-40מ'. הכיוון ההפוך (ייחוס→סריקה) מעניש
+  /// כיסוי-חלקי — פתרון מכווץ שנכנס בפינת-היישוב יקבל מרחק גדול כי רוב
+  /// כבישי-היישוב רחוקים ממנו. נמוך = הכבישים מתיישרים = הרישום נכון.
+  /// שובר גם את אמביגואיית-הסיבוב וגם את דגנרציית-הכיווץ. דוגם לזירוז.
+  static double _roadFit(List<_C> scanRoad, List<_C> refRoad, _C a, _C b) {
+    const cap = 40.0 * 40.0;
+    final stepS = (scanRoad.length / 160).ceil().clamp(1, 1 << 20);
+    final stepR = (refRoad.length / 1600).ceil().clamp(1, 1 << 20);
+
+    // סריקה (מומרת) → כביש-ייחוס.
+    final scanW = <_C>[];
+    for (var si = 0; si < scanRoad.length; si += stepS) {
+      scanW.add(a * scanRoad[si] + b);
+    }
+    final refS = <_C>[];
+    for (var ri = 0; ri < refRoad.length; ri += stepR) {
+      refS.add(refRoad[ri]);
+    }
+    if (scanW.isEmpty || refS.isEmpty) return double.infinity;
+
+    var fwd = 0.0;
+    for (final w in scanW) {
+      var best = cap;
+      for (final r in refS) {
+        final d2 = (w - r).abs2;
+        if (d2 < best) best = d2;
+      }
+      fwd += sqrt(best);
+    }
+    var bwd = 0.0;
+    for (final r in refS) {
+      var best = cap;
+      for (final w in scanW) {
+        final d2 = (r - w).abs2;
+        if (d2 < best) best = d2;
+      }
+      bwd += sqrt(best);
+    }
+    return 0.5 * (fwd / scanW.length + bwd / refS.length);
   }
 
   /// least-squares של טרנספורמציית-דמיון w=a·z+b ממערך התאמות (מרוכב).

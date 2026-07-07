@@ -23,6 +23,17 @@ enum MapFeatureKind {
 /// מועמד-עוגן שאותר אלגוריתמית: מיקום + סוג.
 typedef MapFeature = ({Point<double> pos, MapFeatureKind kind});
 
+/// תוצאת הגלאי: המאפיינים + דגימת נקודות-כביש (מהשלד, בפיקסלי-מקור) —
+/// צורת רשת-הכבישים, לשבירת אמביגואיית-הסיבוב בהתאמה.
+class DetectResult {
+  final List<MapFeature> features;
+  final List<Point<double>> roadPoints;
+  const DetectResult({required this.features, required this.roadPoints});
+
+  static const empty =
+      DetectResult(features: <MapFeature>[], roadPoints: <Point<double>>[]);
+}
+
 /// גלאי מאפייני-מפה קלאסי (עיבוד-תמונה, בלי מודל): מוצא צמתים, קצוות-דרך,
 /// מבנים ועיקולים במפה משורטטת/סרוקה בדיוק-פיקסל ודטרמיניסטית.
 ///
@@ -41,6 +52,11 @@ class RoadJunctionDetector {
   /// הפרמטר.
   static Future<List<MapFeature>> detectInIsolate(img.Image image) {
     return Isolate.run(() => detect(image));
+  }
+
+  /// מריץ את [detectFull] ב-Isolate — מאפיינים + נקודות-כביש (למַתאם).
+  static Future<DetectResult> detectFullInIsolate(img.Image image) {
+    return Isolate.run(() => detectFull(image));
   }
 
   /// מריץ את [detect] ב-Isolate על קובץ — הפענוח הכבד קורה בתוך ה-Isolate.
@@ -64,7 +80,16 @@ class RoadJunctionDetector {
   ///
   /// [debugDir] — כשמוגדר, כותב לשם PNG של כל שלב-ביניים (מסכה, שלד...)
   /// + '00_info.txt' עם ערכי הכיול. לכיול הגלאי על מפות אמיתיות.
+  /// כמו [detectFull] אבל מחזיר רק את המאפיינים (תאימות אחורה).
   static List<MapFeature> detect(
+    img.Image src, {
+    int maxCandidates = 24,
+    String? debugDir,
+  }) =>
+      detectFull(src, maxCandidates: maxCandidates, debugDir: debugDir)
+          .features;
+
+  static DetectResult detectFull(
     img.Image src, {
     int maxCandidates = 24,
     String? debugDir,
@@ -82,7 +107,7 @@ class RoadJunctionDetector {
           : img.copyResize(src, height: workDim);
     }
     final w = work.width, h = work.height;
-    if (w < 60 || h < 60) return const [];
+    if (w < 60 || h < 60) return DetectResult.empty;
 
     // 1) בהירות
     final lum = Uint8List(w * h);
@@ -168,7 +193,9 @@ class RoadJunctionDetector {
     var res = darkRes;
     if (brightRes.junctions.length > res.junctions.length) res = brightRes;
     if (corrRes.junctions.length > res.junctions.length) res = corrRes;
-    if (res.junctions.isEmpty && res.deadEnds.isEmpty) return const [];
+    if (res.junctions.isEmpty && res.deadEnds.isEmpty) {
+      return DetectResult.empty;
+    }
 
     // בחירה: צמתים תחילה (לפי משקל, עם מרחק-מינימום לפיזור; הקלה אם
     // דליל), ואז מכסה קטנה מכל סוג נוסף — מגוון עוזר ל-Gemini לבחור.
@@ -227,10 +254,16 @@ class RoadJunctionDetector {
       File('$debugDir/06_candidates.png').writeAsBytesSync(img.encodePng(vis));
     }
 
-    return [
-      for (final (c, kind) in picked)
-        (pos: Point(c.cx * scale, c.cy * scale), kind: kind),
-    ];
+    return DetectResult(
+      features: [
+        for (final (c, kind) in picked)
+          (pos: Point(c.cx * scale, c.cy * scale), kind: kind),
+      ],
+      // נקודות-הכביש של הענף המנצח, בפיקסלי-מקור.
+      roadPoints: [
+        for (final p in res.roadPoints) Point(p.x * scale, p.y * scale),
+      ],
+    );
   }
 
   /// שמירת מסכה בינארית כ-PNG לדיבוג (לבן = 1).
@@ -355,10 +388,20 @@ class RoadJunctionDetector {
     // כיכר "טבעת": אי-רקע קטן ועגול שכלוא בתוך המסכה (מוקף דרך מכל עבר).
     roundabouts.addAll(_roundIslands(m, w, h, strokeW));
 
+    // דגימת נקודות-כביש מהשלד (כל ~5px) — צורת הרשת עצמה, לא רק צמתים.
+    // משמשת את המַתאם לשבירת אמביגואיית-הסיבוב (כבישים אינם סימטריים).
+    final roadPts = <Point<double>>[];
+    var skelCount = 0;
+    for (var i = 0; i < skel.length; i++) {
+      if (skel[i] == 1 && (skelCount++ % 5 == 0)) {
+        roadPts.add(Point((i % w).toDouble(), (i ~/ w).toDouble()));
+      }
+    }
+
     final junctions = _cluster(junctionPts, w, 16);
     final deadEnds = _cluster(deadEndPts, w, 16);
     final bends = _findBends(skel, w, h, junctionPts, strokeW);
-    return _BranchResult(junctions, deadEnds, bends, roundabouts);
+    return _BranchResult(junctions, deadEnds, bends, roundabouts, roadPts);
   }
 
   /// כיכרות מלאות: רכיבי ליבת-הגושים שהם קטנים ועגולים. עיגול ממלא ~π/4
@@ -894,12 +937,13 @@ class _Cluster {
   _Cluster(this.cx, this.cy, this.weight);
 }
 
-/// תוצאת ענף אחד של הצנרת — מאפיינים לפי סוג.
+/// תוצאת ענף אחד של הצנרת — מאפיינים לפי סוג + דגימת נקודות-כביש.
 class _BranchResult {
   final List<_Cluster> junctions, deadEnds, bends, roundabouts;
-  const _BranchResult(
-      this.junctions, this.deadEnds, this.bends, this.roundabouts);
+  final List<Point<double>> roadPoints;
+  const _BranchResult(this.junctions, this.deadEnds, this.bends,
+      this.roundabouts, this.roadPoints);
 
-  static const empty =
-      _BranchResult(<_Cluster>[], <_Cluster>[], <_Cluster>[], <_Cluster>[]);
+  static const empty = _BranchResult(<_Cluster>[], <_Cluster>[], <_Cluster>[],
+      <_Cluster>[], <Point<double>>[]);
 }
