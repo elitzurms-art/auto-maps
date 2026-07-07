@@ -271,7 +271,10 @@ class _HomeScreenState extends State<HomeScreen> {
     final outcome = _outcome;
     if (path == null || outcome == null) return;
 
-    final defaultName = p.basenameWithoutExtension(path);
+    // מסירים סיומת "-עמודN" שנוספת בקובץ-הביניים של רינדור PDF — מיותרת בשם.
+    final defaultName = p
+        .basenameWithoutExtension(path)
+        .replaceAll(RegExp(r'-עמוד\d+$'), '');
     final params = await showDialog<_ExportParams>(
       context: context,
       builder: (_) => _ExportDialog(defaultName: defaultName),
@@ -438,7 +441,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       ElevatedButton.icon(
                         onPressed: _export,
                         icon: const Icon(Icons.save_alt),
-                        label: const Text('ייצא ל-LiveMaps'),
+                        label: const Text('ייצא לקובץ'),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.green,
                           foregroundColor: Colors.white,
