@@ -409,38 +409,41 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         child: StatefulBuilder(
           builder: (ctx, setDlg) => AlertDialog(
             title: const Text('רמז מיקום (אופציונלי)'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'שם היישוב/האזור של המפה עוזר לאתר את האזור לפני '
-                  'התאמת הנקודות.',
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: ctrl,
-                  autofocus: true,
-                  decoration: const InputDecoration(
-                    labelText: 'למשל: נוב רמת הגולן',
-                    border: OutlineInputBorder(),
+            // גלילה — במסך-טלפון עם מקלדת פתוחה התוכן חורג (פס צהוב-שחור).
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'שם היישוב/האזור של המפה עוזר לאתר את האזור לפני '
+                    'התאמת הנקודות.',
                   ),
-                  onSubmitted: (v) =>
-                      Navigator.pop(ctx, (hint: v.trim(), northUp: northUp)),
-                ),
-                CheckboxListTile(
-                  value: northUp,
-                  onChanged: (v) => setDlg(() => northUp = v ?? true),
-                  contentPadding: EdgeInsets.zero,
-                  controlAffinity: ListTileControlAffinity.leading,
-                  title: const Text('המפה מיושרת לצפון (צפון למעלה)'),
-                  subtitle: const Text(
-                    'מומלץ למפות יישוב — התאמה מהירה ומדויקת בהרבה. '
-                    'בטל רק אם המפה מסובבת.',
-                    style: TextStyle(fontSize: 12),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: ctrl,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      labelText: 'למשל: נוב רמת הגולן',
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (v) =>
+                        Navigator.pop(ctx, (hint: v.trim(), northUp: northUp)),
                   ),
-                ),
-              ],
+                  CheckboxListTile(
+                    value: northUp,
+                    onChanged: (v) => setDlg(() => northUp = v ?? true),
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('המפה מיושרת לצפון (צפון למעלה)'),
+                    subtitle: const Text(
+                      'מומלץ למפות יישוב — התאמה מהירה ומדויקת בהרבה. '
+                      'בטל רק אם המפה מסובבת.',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
             ),
             actions: [
               TextButton(

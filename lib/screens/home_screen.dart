@@ -256,6 +256,39 @@ class _HomeScreenState extends State<HomeScreen> {
     return sel;
   }
 
+  /// כפתור "ערוך מחדש" — כשכבר יש תוצאה, מזהיר שהעריכה מתחילה נעיצה
+  /// מאפס והעבודה הנוכחית (נקודות + כוונון) תלך לאיבוד.
+  Future<void> _editAgain(bool hasResult) async {
+    if (hasResult) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            title: const Text('לערוך מחדש?'),
+            content: const Text(
+              'עריכה מחדש מתחילה נעיצה חדשה מאפס. הנקודות והכוונון הנוכחיים '
+              'לא יישמרו, ותצטרך לנעוץ ולאשר מחדש.\n\n'
+              'התוצאה שכבר חושבה תישאר עד שתסיים נעיצה חדשה.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('ביטול'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('ערוך מחדש'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (ok != true) return;
+    }
+    await _openGeoreference(_imagePath!);
+  }
+
   Future<void> _openGeoreference(String path) async {
     final outcome = await Navigator.push<GeoreferenceOutcome>(
       context,
@@ -429,10 +462,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       const SizedBox(height: 16),
                       OutlinedButton.icon(
-                        onPressed: () => _openGeoreference(_imagePath!),
+                        onPressed: () => _editAgain(hasResult),
                         icon: const Icon(Icons.edit_location_alt),
                         label: Text(
-                          hasResult ? 'ערוך נעיצה מחדש' : 'המשך לנעיצת נקודות',
+                          hasResult ? 'ערוך מחדש' : 'המשך לנעיצת נקודות',
                         ),
                       ),
                     ],
