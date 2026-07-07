@@ -16,7 +16,8 @@ class AiEngine {
   static const _modelKey = 'ollama_model';
 
   static const defaultOllamaUrl = 'http://localhost:11434';
-  static const defaultOllamaModel = 'qwen2.5vl:7b';
+  // 3b — הקל ביותר שרץ על CPU/‏iGPU. במכונה חזקה (M4/GPU) שדרג ל-7b/32b.
+  static const defaultOllamaModel = 'qwen2.5vl:3b';
 
   static Future<String> engine() async {
     final prefs = await SharedPreferences.getInstance();

@@ -185,6 +185,10 @@ class GeminiAnchorService {
     final scaleX = imageWidth / sent.width;
     final scaleY = imageHeight / sent.height;
 
+    // שם המנוע הפעיל להצגה בהודעות-הסטטוס.
+    final engineName =
+        await AiEngine.engine() == AiEngine.ollama ? 'מודל מקומי' : 'Gemini';
+
     // גלאי הצמתים הקלאסי — עיבוד-תמונה מקומי, מדויק-פיקסל, בלי מכסות.
     // כשהוא מוצא מספיק מועמדים, Gemini רק *בוחר ומתאר* (סמנטיקה) במקום
     // *להצביע* (גיאומטריה) — מחסל את סחף-ההצבעה ומייתר את שלב ההצמדה.
@@ -213,8 +217,8 @@ class GeminiAnchorService {
       onStatus?.call(
         round == 1
             ? (useCv
-                  ? 'בוחר עוגנים מהצמתים שאותרו (Gemini)...'
-                  : 'מסמן נקודות בולטות במפה (Gemini)...')
+                  ? 'בוחר עוגנים מהצמתים שאותרו ($engineName)...'
+                  : 'מסמן נקודות בולטות במפה ($engineName)...')
             : 'עוגנים נוספים (סבב $round)...',
       );
       final extraction = useCv
