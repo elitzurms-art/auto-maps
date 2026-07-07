@@ -427,3 +427,37 @@ int ecw_warp_tps(const char *src_path, const char *dst_png_path, int gcp_count,
        out_size2[1], gcp_count);
   return 0;
 }
+
+// Write a north-up GeoTIFF (WGS84) from a raster, assigning corner coords via
+// GDALTranslate -a_ullr (no resampling — original pixels + a geotransform).
+// ulx/uly = upper-left (NW) lon/lat, lrx/lry = lower-right (SE) lon/lat.
+// Uses only symbols already in gdal_i.def (no lib/def regen). Returns 0 on OK.
+int ecw_write_geotiff(const char *src_path, const char *dst_path, double ulx,
+                      double uly, double lrx, double lry) {
+  ensure_registered();
+  if (!src_path || !dst_path) return -1;
+  GDALDatasetH src = GDALOpen(src_path, /*GA_ReadOnly*/ 0);
+  if (!src) {
+    LOGE("geotiff: open failed: %s — %s", src_path, CPLGetLastErrorMsg());
+    return -2;
+  }
+  char s_ulx[64], s_uly[64], s_lrx[64], s_lry[64];
+  snprintf(s_ulx, sizeof(s_ulx), "%.12g", ulx);
+  snprintf(s_uly, sizeof(s_uly), "%.12g", uly);
+  snprintf(s_lrx, sizeof(s_lrx), "%.12g", lrx);
+  snprintf(s_lry, sizeof(s_lry), "%.12g", lry);
+  char *argv[] = {"-of",     "GTiff",     "-a_srs", "EPSG:4326",
+                  "-a_ullr", s_ulx,       s_uly,    s_lrx,
+                  s_lry,     "-co",       "COMPRESS=DEFLATE", NULL};
+  GDALTranslateOptionsH opts = GDALTranslateOptionsNew(argv, NULL);
+  GDALDatasetH out = opts ? GDALTranslate(dst_path, src, opts, NULL) : NULL;
+  if (opts) GDALTranslateOptionsFree(opts);
+  GDALClose(src);
+  if (!out) {
+    LOGE("geotiff: translate failed: %s — %s", dst_path, CPLGetLastErrorMsg());
+    return -3;
+  }
+  GDALClose(out);
+  LOGI("geotiff ok: %s", dst_path);
+  return 0;
+}

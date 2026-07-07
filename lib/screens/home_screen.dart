@@ -3,9 +3,11 @@ import 'dart:io' show Platform;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
 
 import '../services/ai_engine.dart';
+import '../services/geo_export_service.dart';
 import '../services/input_image_service.dart';
 import '../services/livemaps_export_service.dart';
 import '../services/world_file_parser_service.dart';
@@ -278,20 +280,64 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       // ב-TPS מייצאים את הרסטר המיושר שנוצר, לא את המקור.
-      final out = await _exportService.export(
-        sourceImagePath: outcome.warpedImagePath ?? path,
-        result: outcome.result,
-        name: params.name,
-        targetDir: params.targetDir,
-        transform: outcome.transform,
-      );
+      final srcImage = outcome.warpedImagePath ?? path;
+      final corners = outcome.result.cornersWgs84 ??
+          _cornersFromBbox(outcome.result);
+      final base = _sanitize(params.name);
+      final pngPath = p.join(params.targetDir, '$base.png');
+      final written = <String>[];
+
+      // LiveMaps כותב גם את ה-PNG; אחרת מוודאים PNG לפורמטים שנשענים עליו.
+      if (params.formats.contains(ExportFormat.liveMaps)) {
+        final out = await _exportService.export(
+          sourceImagePath: srcImage,
+          result: outcome.result,
+          name: params.name,
+          targetDir: params.targetDir,
+          transform: outcome.transform,
+        );
+        written.add(p.basename(out.jsonPath));
+      } else {
+        await GeoExportService.ensurePng(srcImage, pngPath);
+      }
+      final needsPng = params.formats.any((f) => f != ExportFormat.liveMaps);
+      if (needsPng) written.add('$base.png');
+
+      if (params.formats.contains(ExportFormat.worldFile)) {
+        final files = await GeoExportService.writeWorldFile(
+          pngPath: pngPath,
+          corners: corners,
+          imageWidth: outcome.result.imageWidth,
+          imageHeight: outcome.result.imageHeight,
+        );
+        written.addAll(files.map(p.basename));
+      }
+      if (params.formats.contains(ExportFormat.kmz)) {
+        final kmz = await GeoExportService.writeKmz(
+          pngPath: pngPath,
+          corners: corners,
+          name: params.name,
+          kmzPath: p.join(params.targetDir, '$base.kmz'),
+        );
+        written.add(p.basename(kmz));
+      }
+      if (params.formats.contains(ExportFormat.geoTiff)) {
+        final tif = await GeoExportService.writeGeoTiff(
+          pngPath: pngPath,
+          corners: corners,
+          tifPath: p.join(params.targetDir, '$base.tif'),
+        );
+        written.add(p.basename(tif));
+      }
+
       if (!mounted) return;
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
         ..showSnackBar(
           SnackBar(
-            content: Text('יוצא בהצלחה:\n${out.jsonPath}'),
-            duration: const Duration(seconds: 5),
+            content: Text('יוצא בהצלחה ל-${params.targetDir}:\n'
+                '${written.join(', ')}'),
+            duration: const Duration(seconds: 6),
           ),
         );
     } catch (e) {
@@ -300,6 +346,18 @@ class _HomeScreenState extends State<HomeScreen> {
         ..clearSnackBars()
         ..showSnackBar(SnackBar(content: Text('שגיאת ייצוא: $e')));
     }
+  }
+
+  List<LatLng> _cornersFromBbox(WorldFileResult r) => [
+        LatLng(r.northEast.latitude, r.southWest.longitude), // NW
+        r.northEast, // NE
+        LatLng(r.southWest.latitude, r.northEast.longitude), // SE
+        r.southWest, // SW
+      ];
+
+  String _sanitize(String name) {
+    final cleaned = name.trim().replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+    return cleaned.isEmpty ? 'layer' : cleaned;
   }
 
   @override
@@ -461,7 +519,8 @@ class _InfoCard extends StatelessWidget {
 class _ExportParams {
   final String name;
   final String targetDir;
-  const _ExportParams(this.name, this.targetDir);
+  final Set<ExportFormat> formats;
+  const _ExportParams(this.name, this.targetDir, this.formats);
 }
 
 class _ExportDialog extends StatefulWidget {
@@ -477,6 +536,7 @@ class _ExportDialogState extends State<_ExportDialog> {
     text: widget.defaultName,
   );
   String? _targetDir;
+  final Set<ExportFormat> _formats = {ExportFormat.liveMaps};
 
   @override
   void dispose() {
@@ -486,43 +546,77 @@ class _ExportDialogState extends State<_ExportDialog> {
 
   Future<void> _pickDir() async {
     final dir = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: 'בחר תיקיית יעד (oflline_map)',
+      dialogTitle: 'בחר תיקיית יעד',
     );
     if (dir != null) setState(() => _targetDir = dir);
   }
 
+  Widget _fmtTile(ExportFormat f, String title, String subtitle,
+      {bool enabled = true}) {
+    return CheckboxListTile(
+      value: _formats.contains(f),
+      onChanged: enabled
+          ? (v) => setState(() {
+                if (v == true) {
+                  _formats.add(f);
+                } else {
+                  _formats.remove(f);
+                }
+              })
+          : null,
+      contentPadding: EdgeInsets.zero,
+      controlAffinity: ListTileControlAffinity.leading,
+      dense: true,
+      title: Text(title),
+      subtitle: Text(subtitle, style: const TextStyle(fontSize: 11)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final base = _nameCtrl.text.trim().isEmpty ? 'layer' : _nameCtrl.text.trim();
     return Directionality(
       textDirection: TextDirection.rtl,
       child: AlertDialog(
-        title: const Text('ייצוא ל-LiveMaps'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            TextField(
-              controller: _nameCtrl,
-              decoration: const InputDecoration(
-                labelText: 'שם השכבה',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: _pickDir,
-              icon: const Icon(Icons.folder_open),
-              label: Text(_targetDir ?? 'בחר תיקיית יעד'),
-            ),
-            if (_targetDir != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  '${_nameCtrl.text}.png + ${_nameCtrl.text}.livemap.json',
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+        title: const Text('ייצוא שכבה'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: _nameCtrl,
+                onChanged: (_) => setState(() {}),
+                decoration: const InputDecoration(
+                  labelText: 'שם השכבה',
+                  border: OutlineInputBorder(),
                 ),
               ),
-          ],
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _pickDir,
+                icon: const Icon(Icons.folder_open),
+                label: Text(_targetDir ?? 'בחר תיקיית יעד'),
+              ),
+              const SizedBox(height: 8),
+              const Align(
+                alignment: Alignment.centerRight,
+                child: Text('פורמטים:',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+              _fmtTile(ExportFormat.liveMaps, 'LiveMaps',
+                  '$base.png + $base.livemap.json'),
+              _fmtTile(ExportFormat.worldFile, 'World file (GIS)',
+                  '$base.pgw + $base.prj (QGIS/ArcGIS)'),
+              _fmtTile(ExportFormat.kmz, 'KMZ (Google Earth)', '$base.kmz'),
+              _fmtTile(
+                ExportFormat.geoTiff,
+                'GeoTIFF${GeoExportService.geoTiffSupported ? '' : ' (לא נתמך בפלטפורמה)'}',
+                '$base.tif — מיושר-צפון',
+                enabled: GeoExportService.geoTiffSupported,
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -530,11 +624,14 @@ class _ExportDialogState extends State<_ExportDialog> {
             child: const Text('ביטול'),
           ),
           ElevatedButton(
-            onPressed: (_targetDir != null && _nameCtrl.text.trim().isNotEmpty)
+            onPressed: (_targetDir != null &&
+                    _nameCtrl.text.trim().isNotEmpty &&
+                    _formats.isNotEmpty)
                 ? () => Navigator.pop(
-                    context,
-                    _ExportParams(_nameCtrl.text.trim(), _targetDir!),
-                  )
+                      context,
+                      _ExportParams(
+                          _nameCtrl.text.trim(), _targetDir!, _formats),
+                    )
                 : null,
             child: const Text('ייצא'),
           ),
