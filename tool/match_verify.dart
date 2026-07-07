@@ -29,14 +29,22 @@ Future<void> main(List<String> args) async {
     east: double.parse(args[4]),
   );
   final feats = RoadJunctionDetector.detect(im);
-  final scan = [
-    for (final f in feats)
-      if (f.kind == MapFeatureKind.junction ||
-          f.kind == MapFeatureKind.roundabout)
-        f.pos,
-  ];
+  final scan = <Point<double>>[];
+  final scanRound = <bool>[];
+  for (final f in feats) {
+    if (f.kind == MapFeatureKind.junction ||
+        f.kind == MapFeatureKind.roundabout) {
+      scan.add(f.pos);
+      scanRound.add(f.kind == MapFeatureKind.roundabout);
+    }
+  }
   final osm = await OverpassService.fetchJunctions(bbox);
-  final res = AnchorMatcher.match(scanPx: scan, refGeo: osm.junctions);
+  final res = AnchorMatcher.match(
+    scanPx: scan,
+    refGeo: osm.junctions,
+    scanRound: scanRound,
+    refRound: osm.isRoundabout,
+  );
   if (res == null) {
     print('NO MATCH');
     exitCode = 1;

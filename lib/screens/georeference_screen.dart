@@ -1308,6 +1308,24 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
 
   /// לחיצה ישירה על התמונה — המרה מ-screen coords ל-pixel coords
   void _onImageTap(Offset screenPosition) {
+    // כשיש הצעות-AI ממתינות — לחיצה ישירה על התמונה (לא על סמן) לא נועצת
+    // נקודה חדשה: היא הייתה מוסיפה נקודת-סרק ומעבירה למצב-מפה, ומאבדת את
+    // זרימת אישור-ההצעות. להוספה ידנית מכוונת יש את מצב-הצלב.
+    if (_suggestions.isNotEmpty) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+              'יש הצעות AI ממתינות — לחץ על סמן סגול לאישור. '
+              'להוספה ידנית עבור למצב-צלב (הכפתור בפינה).',
+            ),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      return;
+    }
+
     final matrix = _transformController.value;
     final inverted = Matrix4.inverted(matrix);
     final displayPoint = MatrixUtils.transformPoint(inverted, screenPosition);

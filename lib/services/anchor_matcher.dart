@@ -7,7 +7,8 @@ import 'package:latlong2/latlong.dart';
 class AnchorMatch {
   final Point<double> pixel;
   final LatLng world;
-  const AnchorMatch(this.pixel, this.world);
+  final bool isRoundabout;
+  const AnchorMatch(this.pixel, this.world, {this.isRoundabout = false});
 }
 
 /// תוצאת הרישום: ההתאמות + פרמטרי הטרנספורמציה (לאבחון).
@@ -37,18 +38,28 @@ class AnchorMatcher {
   static Future<MatchResult?> matchInIsolate({
     required List<Point<double>> scanPx,
     required List<LatLng> refGeo,
+    List<bool>? scanRound,
+    List<bool>? refRound,
   }) {
-    return Isolate.run(() => match(scanPx: scanPx, refGeo: refGeo));
+    return Isolate.run(() => match(
+          scanPx: scanPx,
+          refGeo: refGeo,
+          scanRound: scanRound,
+          refRound: refRound,
+        ));
   }
 
   /// [scanPx] — צמתי-סריקה בפיקסלי-מקור. [refGeo] — צמתי-ייחוס.
-  /// מחזיר null כשלא נמצא רישום עם לפחות [minInliers] התאמות.
+  /// [scanRound]/[refRound] — דגלי-כיכר (אם ניתנים, נאכף כיכר↔כיכר בהקצאה
+  /// הסופית — מונע כיכר↔צומת). מחזיר null כשאין רישום עם [minInliers]+.
   static MatchResult? match({
     required List<Point<double>> scanPx,
     required List<LatLng> refGeo,
+    List<bool>? scanRound,
+    List<bool>? refRound,
     int minInliers = 4,
-    double inlierMeters = 45,
-    int iterations = 40000,
+    double inlierMeters = 32,
+    int iterations = 50000,
     int seed = 12345,
   }) {
     if (scanPx.length < minInliers || refGeo.length < minInliers) return null;
@@ -136,23 +147,34 @@ class AnchorMatcher {
 
     if (bestA == null || bestInliers < minInliers) return null;
 
-    // עידון: least-squares דמיון מכל ה-inliers (התכתבות nearest), 2 סבבים.
+    // עידון ICP: least-squares דמיון מכל ה-inliers, כמה סבבים עד התכנסות
+    // — טרנספורמציה מדויקת יותר מפחיתה החלפות בין נקודות סמוכות.
     var a = bestA, b = bestB!;
-    for (var round = 0; round < 2; round++) {
-      final pairs = _correspondences(scan, ref, a, b, thr2);
+    for (var round = 0; round < 5; round++) {
+      final pairs = _correspondences(scan, ref, a, b, thr2, scanRound, refRound);
       if (pairs.length < minInliers) break;
       final fit = _fitSimilarity(
         [for (final p in pairs) scan[p.$1]],
         [for (final p in pairs) ref[p.$2]],
       );
+      if ((fit.$1 - a).abs2 < 1e-9 && (fit.$2 - b).abs2 < 1e-6) {
+        a = fit.$1;
+        b = fit.$2;
+        break; // התכנס
+      }
       a = fit.$1;
       b = fit.$2;
     }
 
     // התאמות סופיות 1-1 (חמדני לפי מרחק), עם snap לקואורדינטת-OSM המדויקת.
-    final pairs = _correspondences(scan, ref, a, b, thr2);
+    final pairs = _correspondences(scan, ref, a, b, thr2, scanRound, refRound);
     final matches = [
-      for (final p in pairs) AnchorMatch(scanPx[p.$1], refGeo[p.$2]),
+      for (final p in pairs)
+        AnchorMatch(
+          scanPx[p.$1],
+          refGeo[p.$2],
+          isRoundabout: refRound?[p.$2] ?? false,
+        ),
     ];
     if (matches.length < minInliers) return null;
 
@@ -168,11 +190,19 @@ class AnchorMatcher {
     _C a,
     _C b,
     double thr2,
+    List<bool>? scanRound,
+    List<bool>? refRound,
   ) {
     final cand = <(double, int, int)>[];
     for (var s = 0; s < scan.length; s++) {
       final w = a * scan[s] + b;
       for (var r = 0; r < ref.length; r++) {
+        // אילוץ-סוג: כיכר מתאימה רק לכיכר (ולהפך).
+        if (scanRound != null &&
+            refRound != null &&
+            scanRound[s] != refRound[r]) {
+          continue;
+        }
         final d2 = (w - ref[r]).abs2;
         if (d2 <= thr2) cand.add((d2, s, r));
       }

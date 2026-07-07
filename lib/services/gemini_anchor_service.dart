@@ -231,12 +231,15 @@ class GeminiAnchorService {
     // ═══ מסלול קלאסי: רישום רשת-כבישים מול OSM (בלי שום קריאת-מודל) ═══
     // כשיש רמז-אזור והגלאי מצא צמתים — מנסים RANSAC בין צמתי-הסריקה
     // לצמתי-OSM וקטוריים. מצליח ⇒ עוגנים מדויקי-פיקסל בלי מכסה/רשת-AI.
-    final junctionPx = <Point<double>>[
-      for (final c in cvCandidates)
-        if (c.kind == MapFeatureKind.junction ||
-            c.kind == MapFeatureKind.roundabout)
-          Point(c.pos.x * scaleX, c.pos.y * scaleY),
-    ];
+    final junctionPx = <Point<double>>[];
+    final scanRound = <bool>[];
+    for (final c in cvCandidates) {
+      if (c.kind == MapFeatureKind.junction ||
+          c.kind == MapFeatureKind.roundabout) {
+        junctionPx.add(Point(c.pos.x * scaleX, c.pos.y * scaleY));
+        scanRound.add(c.kind == MapFeatureKind.roundabout);
+      }
+    }
     if (areaHint != null &&
         areaHint.trim().isNotEmpty &&
         junctionPx.length >= 4) {
@@ -244,11 +247,16 @@ class GeminiAnchorService {
       try {
         final classical = await _classicalMatch(
           junctionPx: junctionPx,
+          scanRound: scanRound,
           areaHint: areaHint.trim(),
         );
         if (classical != null && classical.length >= 4) {
-          _applyGeometricConsistency(classical, imageWidth, imageHeight);
-          return classical;
+          // סינון-שיורי צמוד (40מ') — עוגנים קלאסיים אמורים להתלכד היטב
+          // על affine אחד; מה שסוטה הוא החלפת-נקודות ונזרק.
+          _applyGeometricConsistency(classical, imageWidth, imageHeight,
+              maxResidualMeters: 40);
+          final kept = classical.where((s) => s.verified != false).toList();
+          if (kept.length >= 4) return kept;
         }
       } catch (_) {
         // כשל (רשת/Overpass/אין התאמה) — נופלים חזרה למסלול ה-AI.
@@ -391,13 +399,15 @@ class GeminiAnchorService {
 
   /// מסנן חריגים גיאומטריים: מתאים affine לכל העוגנים, מחשב סטייה פר-עוגן
   /// (מטרים בין העולם-בפועל לעולם-החזוי מהטרנספורמציה), ופוסל איטרטיבית את
-  /// החריג הגרוע כל עוד הוא קיצוני (מעל [max(300מ', 4×חציון)]). סף נדיב —
-  /// מפות משורטטות/מצולמות מעוותות באמת, וסטיות של עשרות מטרים לגיטימיות.
+  /// החריג הגרוע כל עוד הוא קיצוני. סף ברירת-מחדל נדיב (`max(300מ', 4×חציון)`)
+  /// למסלול-ה-AI (מפות מעוותות); [maxResidualMeters] קובע סף אבסולוטי צמוד
+  /// למסלול הקלאסי — עוגני-OSM אמורים להתלכד היטב, וסטייה = החלפת-נקודות.
   void _applyGeometricConsistency(
     List<GeminiAnchorSuggestion> all,
     int imageWidth,
-    int imageHeight,
-  ) {
+    int imageHeight, {
+    double? maxResidualMeters,
+  }) {
     while (true) {
       final active = [
         for (var i = 0; i < all.length; i++)
@@ -453,7 +463,8 @@ class GeminiAnchorService {
         if (residuals[j] > residuals[worstIdx]) worstIdx = j;
       }
       final worst = residuals[worstIdx];
-      if (worst <= max(300, 4 * median)) return; // אין חריג קיצוני — סיימנו
+      final limit = maxResidualMeters ?? max(300, 4 * median);
+      if (worst <= limit) return; // אין חריג קיצוני — סיימנו
 
       final i = active[worstIdx];
       all[i] = all[i].copyWith(
@@ -872,6 +883,7 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
   /// מאומתים (world = קואורדינטת-OSM מדויקת) או null כשההתאמה לא אמינה.
   Future<List<GeminiAnchorSuggestion>?> _classicalMatch({
     required List<Point<double>> junctionPx,
+    required List<bool> scanRound,
     required String areaHint,
   }) async {
     // bbox צמוד ליישוב — ריפוד רחב בולע יישוב שכן עם רשת-כבישים דומה
@@ -892,6 +904,8 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     final res = await AnchorMatcher.matchInIsolate(
       scanPx: junctionPx,
       refGeo: osm.junctions,
+      scanRound: scanRound,
+      refRound: osm.isRoundabout,
     );
     // דורשים יחס-inliers סביר — מגן מפני התאמה-חלקית מקרית.
     final minReq = max(4, (junctionPx.length * 0.35).round());
@@ -902,12 +916,13 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
         GeminiAnchorSuggestion(
           pixel: Offset(m.pixel.x, m.pixel.y),
           world: m.world,
-          name: 'צומת כבישים',
+          name: m.isRoundabout ? 'כיכר' : 'צומת כבישים',
           confidence: 1,
-          basis: 'התאמת רשת-כבישים מול OSM',
+          basis: m.isRoundabout
+              ? 'התאמת כיכר מול OSM'
+              : 'התאמת רשת-כבישים מול OSM',
           verified: true,
-          verifyNote: 'רישום גיאומטרי (RANSAC, '
-              '${res.inliers} התאמות)',
+          verifyNote: 'רישום גיאומטרי (RANSAC, ${res.inliers} התאמות)',
         ),
     ];
   }

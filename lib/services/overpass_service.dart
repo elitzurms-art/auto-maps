@@ -30,11 +30,13 @@ class OverpassService {
       'residential|living_street|service|road)\$';
 
   /// צומת מאותר: מיקום + מספר-סידורי + שכנים (אינדקסים) בגרף הכבישים.
-  /// השכנים משמשים לאילוץ-טופולוגיה בהתאמה.
+  /// השכנים משמשים לאילוץ-טופולוגיה בהתאמה. [isRoundabout] מסמן אילו
+  /// צמתים הם מרכזי-כיכר — לאילוץ כיכר↔כיכר בהתאמה.
   final List<LatLng> junctions;
   final List<Set<int>> neighbors;
+  final List<bool> isRoundabout;
 
-  OverpassService._(this.junctions, this.neighbors);
+  OverpassService._(this.junctions, this.neighbors, this.isRoundabout);
 
   /// שולף את רשת-הכבישים ב-[bbox], מחשב צמתים (client-side מ-`out geom`)
   /// ומאשכל צמתים קרובים (< [clusterMeters]). זורק על כשל-רשת.
@@ -61,7 +63,30 @@ class OverpassService {
     final elements = (jsonDecode(body)['elements'] as List)
         .cast<Map<String, dynamic>>();
 
+    // מעבר ראשון: כיכרות. דרך עם junction=roundabout/circular = טבעת;
+    // מרכז-הכיכר = צנטרואיד הטבעת (נקודה אחת), ונודי-הטבעת עצמם מוחרגים
+    // מהצמתים הרגילים — אחרת כיכר אחת יוצרת אשכול צמתים במקום נקודה אחת
+    // (וזה מה שגרם לכיכר-בסריקה להתאים לצומת-רגיל).
+    final roundaboutNodes = <int>{};
+    final roundaboutCenters = <LatLng>[];
+    for (final w in elements) {
+      if (w['type'] != 'way') continue;
+      final j = (w['tags'] as Map?)?['junction'];
+      if (j != 'roundabout' && j != 'circular') continue;
+      final geom = (w['geometry'] as List?)?.cast<Map<String, dynamic>>();
+      final ids = (w['nodes'] as List?)?.cast<int>();
+      if (geom == null || geom.isEmpty || ids == null) continue;
+      var lat = 0.0, lon = 0.0;
+      for (final g in geom) {
+        lat += (g['lat'] as num).toDouble();
+        lon += (g['lon'] as num).toDouble();
+      }
+      roundaboutCenters.add(LatLng(lat / geom.length, lon / geom.length));
+      roundaboutNodes.addAll(ids);
+    }
+
     // ספירת-הופעות של כל צומת-רשת + קִשוריות בין צמתי-רשת סמוכים בדרך.
+    // נודי-טבעת מוחרגים (מיוצגים ע"י מרכז-הכיכר).
     final nodeCount = <int, int>{};
     final nodeCoord = <int, LatLng>{};
     final nodeAdj = <int, Set<int>>{};
@@ -72,12 +97,13 @@ class OverpassService {
       if (ids == null || geom == null || ids.length != geom.length) continue;
       for (var i = 0; i < ids.length; i++) {
         final id = ids[i];
+        if (roundaboutNodes.contains(id)) continue;
         nodeCount[id] = (nodeCount[id] ?? 0) + 1;
         nodeCoord[id] = LatLng(
           (geom[i]['lat'] as num).toDouble(),
           (geom[i]['lon'] as num).toDouble(),
         );
-        if (i > 0) {
+        if (i > 0 && !roundaboutNodes.contains(ids[i - 1])) {
           nodeAdj.putIfAbsent(id, () => {}).add(ids[i - 1]);
           nodeAdj.putIfAbsent(ids[i - 1], () => {}).add(id);
         }
@@ -117,6 +143,7 @@ class OverpassService {
     }
     final junctions = <LatLng>[];
     final neighbors = <Set<int>>[];
+    final isRoundabout = <bool>[];
     for (var c = 0; c < clusters.length; c++) {
       var lat = 0.0, lon = 0.0;
       final adj = <int>{};
@@ -130,9 +157,16 @@ class OverpassService {
       }
       junctions.add(LatLng(lat / clusters[c].length, lon / clusters[c].length));
       neighbors.add(adj);
+      isRoundabout.add(false);
+    }
+    // מרכזי-הכיכר נוספים כצמתים מסומנים (בלי קִשוריות-גרף — לא נדרשת).
+    for (final center in roundaboutCenters) {
+      junctions.add(center);
+      neighbors.add(const {});
+      isRoundabout.add(true);
     }
 
-    return OverpassService._(junctions, neighbors);
+    return OverpassService._(junctions, neighbors, isRoundabout);
   }
 
   static Future<String> _post(String query) async {
