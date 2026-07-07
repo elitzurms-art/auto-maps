@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import '../services/gdal_warp_service.dart';
 import '../services/gemini_anchor_service.dart';
 import '../services/reference_map_controller.dart';
+import '../services/road_junction_detector.dart';
 import '../services/world_file_parser_service.dart';
 
 /// נקודת התאמה — pixel על התמונה + world על המפה
@@ -93,6 +94,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   List<GeminiAnchorSuggestion> _suggestions = [];
   bool _aiBusy = false;
   bool _warping = false;
+
+  // צמתים מהגלאי המקומי (עיבוד-תמונה, בלי AI) — לחיצה על סמן נועצת נקודה.
+  List<Offset> _cvCandidates = [];
+  bool _cvBusy = false;
 
   @override
   void initState() {
@@ -248,6 +253,79 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     }
   }
 
+  // ═══ גלאי הצמתים המקומי (בלי AI, בלי רשת) ═══
+
+  /// מציג/מסתיר את צמתי-הגלאי על התמונה. הריצה ב-Isolate (הדילול כבד).
+  Future<void> _toggleCvCandidates() async {
+    if (_cvBusy) return;
+    if (_cvCandidates.isNotEmpty) {
+      setState(() => _cvCandidates = []);
+      return;
+    }
+    setState(() => _cvBusy = true);
+    try {
+      final pts =
+          await RoadJunctionDetector.detectFileInIsolate(widget.imagePath);
+      if (!mounted) return;
+      setState(() {
+        _cvCandidates = [for (final c in pts) Offset(c.x, c.y)];
+      });
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              pts.isEmpty
+                  ? 'לא אותרו צמתים בעיבוד-תמונה (ניגודיות חלשה?)'
+                  : 'אותרו ${pts.length} צמתים (עיבוד מקומי, בלי AI) — '
+                        'לחיצה על סמן כחלחל נועצת שם נקודה',
+            ),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(content: Text('איתור צמתים נכשל: $e')));
+    } finally {
+      if (mounted) setState(() => _cvBusy = false);
+    }
+  }
+
+  /// סמני צמתי-הגלאי (טורקיז) על התמונה; לחיצה נועצת נקודה בפיקסל המדויק.
+  List<Widget> _buildCvMarkers() {
+    final scale = _displayScale;
+    return _cvCandidates.map((c) {
+      return Positioned(
+        left: c.dx * scale - 10,
+        top: c.dy * scale - 10,
+        child: GestureDetector(
+          onTap: () => _pickOnImage(c),
+          child: Container(
+            width: 20,
+            height: 20,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.teal.withValues(alpha: 0.25),
+              border: Border.all(color: Colors.teal, width: 2),
+            ),
+            child: Center(
+              child: Container(
+                width: 4,
+                height: 4,
+                decoration: const BoxDecoration(
+                  color: Colors.teal,
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }).toList();
+  }
+
   // ═══ מצב אוטומטי — הצעת עוגנים (Gemini) ═══
 
   Future<void> _runAiSuggest() async {
@@ -256,6 +334,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     key ??= await _promptApiKey();
     if (key == null || !mounted) return;
 
+    // רמז-מיקום — מנחה את איתור האזור (שלב הג'יאוקודינג); null = ביטול.
+    final hint = await _promptAreaHint();
+    if (hint == null || !mounted) return;
+
     setState(() => _aiBusy = true);
     try {
       final suggestions = await GeminiAnchorService().suggestAnchors(
@@ -263,6 +345,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         imageWidth: _imageWidth,
         imageHeight: _imageHeight,
         apiKey: key,
+        areaHint: hint.isEmpty ? null : hint,
         onStatus: (status) {
           if (!mounted) return;
           ScaffoldMessenger.of(context)
@@ -276,24 +359,34 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         },
       );
       if (!mounted) return;
+      // הצעות שנדחו באימות הן רעש — לא מוצגות; מדווחות רק במונה.
+      final rejected = suggestions.where((s) => s.verified == false).length;
+      final shown = suggestions.where((s) => s.verified != false).toList();
       setState(() {
-        _suggestions = suggestions;
+        _suggestions = shown;
         _isOnMap = false; // ההצעות מוצגות על התמונה
       });
-      final verifiedCount =
-          suggestions.where((s) => s.verified == true).length;
+      final verifiedCount = shown.where((s) => s.verified == true).length;
+      final fallbackNote = GeminiAnchorService.usingFallbackModel
+          ? '\n⚠ רץ על מודל חלופי (${GeminiAnchorService.activeModel}) — '
+                'המכסה של המודל הראשי נגמרה; הדיוק עלול להיות נמוך יותר'
+          : '';
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
         ..showSnackBar(
           SnackBar(
             content: Text(
-              suggestions.isEmpty
-                  ? 'לא זוהו עוגנים בביטחון מספיק — נעץ ידנית'
-                  : 'נתקבלו ${suggestions.length} הצעות '
-                        '($verifiedCount אומתו מול מפת הייחוס) — '
-                        'לחץ על סמן סגול לאישור',
+              (shown.isEmpty
+                      ? 'לא נמצאו עוגנים שעברו אימות'
+                            '${rejected > 0 ? ' ($rejected נדחו)' : ''} — '
+                            'נעץ ידנית'
+                      : 'נתקבלו ${shown.length} הצעות '
+                            '($verifiedCount אומתו'
+                            '${rejected > 0 ? ', $rejected נדחו והוסתרו' : ''}'
+                            ') — לחץ על סמן סגול לאישור') +
+                  fallbackNote,
             ),
-            duration: const Duration(seconds: 5),
+            duration: const Duration(seconds: 8),
           ),
         );
     } catch (e) {
@@ -350,6 +443,58 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     if (key == null || key.isEmpty) return null;
     await GeminiAnchorService.setApiKey(key);
     return key;
+  }
+
+  /// דיאלוג רמז-מיקום לפני ההרצה. מחזיר את הטקסט ('' = בלי רמז) או null
+  /// בביטול. הרמז נשמר לפריפיל בהרצה הבאה.
+  Future<String?> _promptAreaHint() async {
+    final ctrl = TextEditingController(
+      text: await GeminiAnchorService.getAreaHint() ?? '',
+    );
+    if (!mounted) return null;
+    final hint = await showDialog<String>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: const Text('רמז מיקום (אופציונלי)'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'שם היישוב/האזור של המפה עוזר ל-AI לאתר את האזור '
+                'במפה ובלוויין לפני התאמת הנקודות.',
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: ctrl,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'למשל: נוב רמת הגולן',
+                  border: OutlineInputBorder(),
+                ),
+                onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('ביטול'),
+            ),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              icon: const Icon(Icons.auto_awesome),
+              label: const Text('הרץ'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (hint != null && hint.isNotEmpty) {
+      await GeminiAnchorService.setAreaHint(hint);
+    }
+    return hint;
   }
 
   /// אישור/דחייה של הצעת-עוגן בודדת — הלב של "אישור פר-נקודה".
@@ -668,14 +813,15 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
-              leading: const Icon(Icons.edit),
-              title: const Text('ערוך נקודה'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _editPoint(index);
-              },
-            ),
+            if (_points[index].isComplete)
+              ListTile(
+                leading: const Icon(Icons.edit),
+                title: const Text('ערוך נקודה'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _editPoint(index);
+                },
+              ),
             ListTile(
               leading: const Icon(Icons.delete, color: Colors.red),
               title: const Text(
@@ -715,6 +861,28 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         appBar: AppBar(
           title: Text('ג\'יאורפרנס ($_completeCount / $_minPoints נקודות)'),
           actions: [
+            // גלאי צמתים מקומי — עובד גם בלי AI/רשת/מכסה
+            _cvBusy
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 14),
+                    child: Center(
+                      child: SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                  )
+                : IconButton(
+                    icon: Icon(
+                      Icons.hub_outlined,
+                      color: _cvCandidates.isNotEmpty ? Colors.teal : null,
+                    ),
+                    tooltip: _cvCandidates.isNotEmpty
+                        ? 'הסתר צמתים שאותרו'
+                        : 'אתר צמתים (מקומי, בלי AI)',
+                    onPressed: _toggleCvCandidates,
+                  ),
             // מצב אוטומטי — הצעת עוגנים מ-Gemini עם אישור פר-נקודה
             _aiBusy
                 ? const Padding(
@@ -787,9 +955,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                           ),
                         ),
                         backgroundColor: isEditing ? Colors.blue[50] : null,
-                        onPressed: p.isComplete
-                            ? () => _showPointMenu(i)
-                            : null,
+                        // גם נקודה לא-גמורה (נעיצת-סרק) חייבת להיות ניתנת
+                        // למחיקה — אחרת אין דרך לבטל אותה.
+                        onPressed: () => _showPointMenu(i),
                       ),
                     );
                   }),
@@ -935,6 +1103,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                   ..._buildImageMarkers(),
                   // הצעות AI סגולות — ממתינות לאישור פר-נקודה
                   ..._buildSuggestionMarkers(),
+                  // צמתים מהגלאי המקומי — לחיצה נועצת נקודה
+                  ..._buildCvMarkers(),
                 ],
               ),
             ),
