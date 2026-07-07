@@ -99,6 +99,33 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
     return LatLng(lat / act.length, lon / act.length);
   }
 
+  /// מטיל פיקסל-סריקה לעולם לפי ה-affine הנוכחי (אינטרפולציה בי-לינארית
+  /// של 4 הפינות) — מראה **היכן הסריקה נוחתת** מול המיקום ב-OSM.
+  LatLng? _projectScan(Offset px, WorldFileResult prov) {
+    final c = prov.cornersWgs84;
+    final LatLng nw, ne, se, sw;
+    if (c != null && c.length == 4) {
+      nw = c[0];
+      ne = c[1];
+      se = c[2];
+      sw = c[3];
+    } else {
+      nw = LatLng(prov.northEast.latitude, prov.southWest.longitude);
+      ne = prov.northEast;
+      se = LatLng(prov.southWest.latitude, prov.northEast.longitude);
+      sw = prov.southWest;
+    }
+    final u = (px.dx / widget.imageWidth).clamp(0.0, 1.0);
+    final v = (px.dy / widget.imageHeight).clamp(0.0, 1.0);
+    LatLng lerp(LatLng a, LatLng b, double t) => LatLng(
+          a.latitude + (b.latitude - a.latitude) * t,
+          a.longitude + (b.longitude - a.longitude) * t,
+        );
+    final top = lerp(nw, ne, u);
+    final bottom = lerp(sw, se, u);
+    return lerp(top, bottom, v);
+  }
+
   void _onMapTap(LatLng p) {
     if (_placingOnMap && _selected != null) {
       setState(() {
@@ -203,7 +230,36 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                       ),
                     ],
                   ),
-                MarkerLayer(markers: [for (var i = 0; i < _anchors.length; i++) _marker(i)]),
+                // קווי-שגיאה: מחברים "היכן הסריקה נוחתת" ל"מיקום ב-OSM".
+                if (prov != null)
+                  PolylineLayer(
+                    polylines: [
+                      for (var i = 0; i < _anchors.length; i++)
+                        if (!_anchors[i].rejected)
+                          if (_projectScan(_anchors[i].pixel, prov)
+                              case final sp?)
+                            Polyline(
+                              points: [sp, _anchors[i].world],
+                              color: _selected == i
+                                  ? Colors.amber
+                                  : Colors.orange.withValues(alpha: 0.7),
+                              strokeWidth: _selected == i ? 3 : 2,
+                            ),
+                    ],
+                  ),
+                // שכבה 1 — סמן-סריקה (היכן הצומת של הסריקה נוחת).
+                if (prov != null)
+                  MarkerLayer(markers: [
+                    for (var i = 0; i < _anchors.length; i++)
+                      if (!_anchors[i].rejected)
+                        if (_projectScan(_anchors[i].pixel, prov)
+                            case final sp?)
+                          _scanMarker(i, sp),
+                  ]),
+                // שכבה 2 — סמן-עולם (המיקום האמיתי ב-OSM).
+                MarkerLayer(markers: [
+                  for (var i = 0; i < _anchors.length; i++) _worldMarker(i),
+                ]),
               ],
             ),
 
@@ -242,18 +298,17 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
     );
   }
 
-  Marker _marker(int i) {
+  /// סמן-העולם (🟠) — המיקום האמיתי ב-OSM; היעד. גרירה דרך "הזז על המפה".
+  Marker _worldMarker(int i) {
     final a = _anchors[i];
     final sel = _selected == i;
     final color = a.rejected
         ? Colors.red
-        : (a.kind == AnchorVerifyKind.geometric
-            ? Colors.teal
-            : Colors.green);
+        : (a.kind == AnchorVerifyKind.geometric ? Colors.teal : Colors.green);
     return Marker(
       point: a.world,
-      width: 44,
-      height: 44,
+      width: 46,
+      height: 46,
       child: GestureDetector(
         onTap: () => setState(() {
           _selected = sel ? null : i;
@@ -266,14 +321,16 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
               width: sel ? 30 : 24,
               height: sel ? 30 : 24,
               decoration: BoxDecoration(
-                color: a.rejected
-                    ? Colors.white
-                    : color.withValues(alpha: 0.9),
+                color:
+                    a.rejected ? Colors.white : color.withValues(alpha: 0.9),
                 shape: BoxShape.circle,
                 border: Border.all(
                   color: sel ? Colors.amber : color,
                   width: sel ? 3 : 2,
                 ),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black38, blurRadius: 2),
+                ],
               ),
               alignment: Alignment.center,
               child: a.rejected
@@ -287,7 +344,6 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                       ),
                     ),
             ),
-            // תג אימות: ⊹ גיאומטרי / ◉ ראייה
             if (!a.rejected)
               Icon(
                 a.kind == AnchorVerifyKind.geometric
@@ -297,6 +353,42 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                 color: color,
               ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// סמן-הסריקה (🔵 חלול) — היכן הצומת של הסריקה נוחת לפי ה-affine הנוכחי.
+  /// הפער בינו לסמן-העולם = שגיאת-העוגן. עריכה דרך "הזז על הסריקה".
+  Marker _scanMarker(int i, LatLng at) {
+    final sel = _selected == i;
+    return Marker(
+      point: at,
+      width: 30,
+      height: 30,
+      child: GestureDetector(
+        onTap: () => setState(() {
+          _selected = sel ? null : i;
+          _placingOnMap = false;
+        }),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.85),
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: sel ? Colors.amber : Colors.blue,
+              width: sel ? 3 : 2,
+            ),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            '${i + 1}',
+            style: TextStyle(
+              color: Colors.blue[800],
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
         ),
       ),
     );
@@ -329,17 +421,49 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                   style: const TextStyle(color: Colors.white70)),
             ],
           ),
-          if (sel == null)
+          if (sel == null) ...[
+            // מקרא: מה משמעות שני הסמנים והקו.
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 12,
+              children: [
+                _legendDot(Colors.blue, 'היכן הסריקה נוחתת', filled: false),
+                _legendDot(Colors.green, 'המיקום ב-OSM'),
+                const Text('· קו = שגיאה',
+                    style: TextStyle(color: Colors.white70, fontSize: 12)),
+              ],
+            ),
+            const SizedBox(height: 2),
             Text(
               rejected == 0
                   ? 'מאושרות: $approved · הקש על פין לפסילה/הזזה'
                   : 'מאושרות: $approved · נפסלו: $rejected',
               style: const TextStyle(color: Colors.white70, fontSize: 13),
-            )
-          else
+            ),
+          ] else
             _selectedActions(sel),
         ],
       ),
+    );
+  }
+
+  Widget _legendDot(Color c, String label, {bool filled = true}) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 12,
+          height: 12,
+          decoration: BoxDecoration(
+            color: filled ? c : Colors.white,
+            shape: BoxShape.circle,
+            border: Border.all(color: c, width: 2),
+          ),
+        ),
+        const SizedBox(width: 4),
+        Text(label,
+            style: const TextStyle(color: Colors.white70, fontSize: 12)),
+      ],
     );
   }
 
