@@ -5,6 +5,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../services/gemini_anchor_service.dart';
+import '../services/overpass_service.dart';
 import '../services/reference_map_controller.dart';
 import '../services/world_file_parser_service.dart';
 
@@ -62,6 +63,12 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
   bool _activeSideScan = false;
   bool _draggingHandle = false; // בזמן גרירת-הידית משביתים גרירת-מפה
 
+  // צמתי-OSM לאזור (best-effort, ל"הצמד לצומת"); ריק עד שהטעינה מצליחה.
+  List<LatLng> _osmJunctions = const [];
+  bool _osmLoading = false;
+
+  static const Distance _dist = Distance();
+
   @override
   void initState() {
     super.initState();
@@ -75,10 +82,119 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
           rejected: s.verified == false,
         ),
     ];
+    _loadOsm();
+  }
+
+  /// טוען צמתי-OSM לאזור-העוגנים (best-effort) — מאפשר "הצמד לצומת".
+  /// כשל-רשת לא מפיל: האימות-הגיאומטרי (שאריות/עקביות) עובד בלעדיו.
+  Future<void> _loadOsm() async {
+    if (_anchors.isEmpty) return;
+    setState(() => _osmLoading = true);
+    try {
+      var minLat = 90.0, maxLat = -90.0, minLon = 180.0, maxLon = -180.0;
+      for (final a in _anchors) {
+        minLat = a.world.latitude < minLat ? a.world.latitude : minLat;
+        maxLat = a.world.latitude > maxLat ? a.world.latitude : maxLat;
+        minLon = a.world.longitude < minLon ? a.world.longitude : minLon;
+        maxLon = a.world.longitude > maxLon ? a.world.longitude : maxLon;
+      }
+      final dLat = (maxLat - minLat) * 0.2 + 0.002;
+      final dLon = (maxLon - minLon) * 0.2 + 0.002;
+      final osm = await OverpassService.fetchJunctions((
+        south: minLat - dLat,
+        west: minLon - dLon,
+        north: maxLat + dLat,
+        east: maxLon + dLon,
+      ));
+      if (!mounted) return;
+      setState(() {
+        _osmJunctions = osm.junctions;
+        _osmLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _osmLoading = false);
+    }
   }
 
   List<_Anchor> get _active =>
       _anchors.where((a) => !a.rejected).toList(growable: false);
+
+  List<int> get _activeIdx => [
+        for (var i = 0; i < _anchors.length; i++)
+          if (!_anchors[i].rejected) i,
+      ];
+
+  /// שארית leave-one-out לכל עוגן פעיל: מרחק (מ') בין מיקום-העולם שלו
+  /// לבין החיזוי מ-affine שהותאם ל**כל שאר** העוגנים. עוגן שסוטה = חשוד
+  /// (התאמה שגויה / החלפת-נקודות) — רדאר-חשד גיאומטרי טהור, בלי AI.
+  Map<int, double> _residuals() {
+    final res = <int, double>{};
+    // בזמן גרירה מדלגים (N התאמות-affine לכל אירוע-תנועה = לאג); הרדאר
+    // מתרענן ברגע שחרור-הידית.
+    if (_draggingHandle) return res;
+    final act = _activeIdx;
+    if (act.length < 4) return res; // צריך ≥3 אחרים לבניית affine
+    for (final i in act) {
+      final others = [
+        for (final j in act)
+          if (j != i) (pixel: _anchors[j].pixel, world: _anchors[j].world),
+      ];
+      try {
+        final prov = WorldFileParserService.calculateFromControlPoints(
+          points: others,
+          imageWidth: widget.imageWidth,
+          imageHeight: widget.imageHeight,
+        );
+        final pred = _projectScan(_anchors[i].pixel, prov);
+        if (pred != null) res[i] = _dist(pred, _anchors[i].world);
+      } catch (_) {}
+    }
+    return res;
+  }
+
+  /// סף-חשד: חורג מ-max(45מ', 2.5×חציון-השאריות).
+  double _suspectThreshold(Map<int, double> res) {
+    if (res.isEmpty) return double.infinity;
+    final vals = res.values.toList()..sort();
+    final median = vals[vals.length ~/ 2];
+    return (2.5 * median).clamp(45.0, double.infinity);
+  }
+
+  /// תיקון גיאומטרי א' — "יישר לעקביות": מזיז את צד-העולם של העוגן אל
+  /// החיזוי מ-affine של כל השאר. מתקן החלפת-נקודות/התאמה שגויה בלי OSM.
+  void _snapToConsensus(int i) {
+    final others = [
+      for (final j in _activeIdx)
+        if (j != i) (pixel: _anchors[j].pixel, world: _anchors[j].world),
+    ];
+    if (others.length < 3) return;
+    try {
+      final prov = WorldFileParserService.calculateFromControlPoints(
+        points: others,
+        imageWidth: widget.imageWidth,
+        imageHeight: widget.imageHeight,
+      );
+      final pred = _projectScan(_anchors[i].pixel, prov);
+      if (pred != null) setState(() => _anchors[i].world = pred);
+    } catch (_) {}
+  }
+
+  /// תיקון גיאומטרי ב' — "הצמד לצומת": מזיז את צד-העולם לצומת-OSM הקרוב
+  /// ביותר (עד ~120מ'). מיישר לאמת-הקרקע, לא רק לעקביות-פנימית.
+  void _snapToJunction(int i) {
+    if (_osmJunctions.isEmpty) return;
+    final w = _anchors[i].world;
+    LatLng? best;
+    var bestD = 120.0; // לא נצמיד לצומת רחוק מדי
+    for (final j in _osmJunctions) {
+      final d = _dist(w, j);
+      if (d < bestD) {
+        bestD = d;
+        best = j;
+      }
+    }
+    if (best != null) setState(() => _anchors[i].world = best!);
+  }
 
   /// affine זמני מהעוגנים הפעילים — לשילוב-השקוף החי.
   WorldFileResult? _provisional() {
@@ -239,12 +355,34 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
     final prov = _provisional();
     final approved = _active.length;
     final rejected = _anchors.length - approved;
+    final residuals = _residuals();
+    final threshold = _suspectThreshold(residuals);
+    final suspects =
+        residuals.entries.where((e) => e.value > threshold).length;
+    final medianRes = residuals.isEmpty
+        ? null
+        : (residuals.values.toList()..sort())[residuals.length ~/ 2];
 
     return Directionality(
       textDirection: TextDirection.rtl,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('כוונון ואישור'),
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('כוונון ואישור'),
+              if (medianRes != null)
+                Text(
+                  'עקביות: ${medianRes.round()} מ׳ חציון'
+                  '${suspects > 0 ? '  ·  ⚠ $suspects חשודות' : '  ·  ✓ ללא חריגות'}',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: suspects > 0 ? Colors.amber : Colors.white70,
+                  ),
+                ),
+            ],
+          ),
           actions: [
             // מתג מפה/לוויין
             Padding(
@@ -334,7 +472,9 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                   ]),
                 // שכבה 2 — סמן-עולם (המיקום האמיתי ב-OSM).
                 MarkerLayer(markers: [
-                  for (var i = 0; i < _anchors.length; i++) _worldMarker(i),
+                  for (var i = 0; i < _anchors.length; i++)
+                    _worldMarker(
+                        i, (residuals[i] ?? 0) > threshold && !_anchors[i].rejected),
                 ]),
                 // שכבה 3 — ידית-גרירה גדולה לצד-הנבחר של העוגן הנבחר (תמיד
                 // למעלה; פותרת נקודה-על-נקודה).
@@ -350,7 +490,7 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
               left: 0,
               right: 0,
               bottom: 0,
-              child: _bottomBar(approved, rejected),
+              child: _bottomBar(approved, rejected, residuals, threshold),
             ),
           ],
         ),
@@ -358,13 +498,18 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
     );
   }
 
-  /// סמן-העולם (🟠) — המיקום האמיתי ב-OSM; היעד. גרירה דרך "הזז על המפה".
-  Marker _worldMarker(int i) {
+  /// סמן-העולם (🟢) — המיקום האמיתי ב-OSM; היעד. [suspect] = השארית שלו
+  /// חורגת → מסגרת-אזהרה כתומה (רדאר-החשד הגיאומטרי).
+  Marker _worldMarker(int i, bool suspect) {
     final a = _anchors[i];
     final sel = _selected == i;
     final color = a.rejected
         ? Colors.red
-        : (a.kind == AnchorVerifyKind.geometric ? Colors.teal : Colors.green);
+        : suspect
+            ? Colors.orange
+            : (a.kind == AnchorVerifyKind.geometric
+                ? Colors.teal
+                : Colors.green);
     return Marker(
       point: a.world,
       width: 46,
@@ -385,8 +530,10 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                     a.rejected ? Colors.white : color.withValues(alpha: 0.9),
                 shape: BoxShape.circle,
                 border: Border.all(
-                  color: sel ? Colors.amber : color,
-                  width: sel ? 3 : 2,
+                  color: sel
+                      ? Colors.amber
+                      : (suspect ? Colors.deepOrange : color),
+                  width: sel || suspect ? 3 : 2,
                 ),
                 boxShadow: const [
                   BoxShadow(color: Colors.black38, blurRadius: 2),
@@ -406,11 +553,13 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
             ),
             if (!a.rejected)
               Icon(
-                a.kind == AnchorVerifyKind.geometric
-                    ? Icons.architecture
-                    : Icons.remove_red_eye,
+                suspect
+                    ? Icons.warning
+                    : (a.kind == AnchorVerifyKind.geometric
+                        ? Icons.architecture
+                        : Icons.remove_red_eye),
                 size: 12,
-                color: color,
+                color: suspect ? Colors.deepOrange : color,
               ),
           ],
         ),
@@ -454,7 +603,8 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
     );
   }
 
-  Widget _bottomBar(int approved, int rejected) {
+  Widget _bottomBar(int approved, int rejected, Map<int, double> residuals,
+      double threshold) {
     final sel = _selected;
     return Container(
       color: Colors.black.withValues(alpha: 0.72),
@@ -501,7 +651,7 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
               style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
           ] else
-            _selectedActions(sel),
+            _selectedActions(sel, residuals[sel], threshold),
         ],
       ),
     );
@@ -527,8 +677,9 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
     );
   }
 
-  Widget _selectedActions(int sel) {
+  Widget _selectedActions(int sel, double? residual, double threshold) {
     final a = _anchors[sel];
+    final suspect = residual != null && residual > threshold && !a.rejected;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -537,6 +688,17 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
           '${a.kind == AnchorVerifyKind.geometric ? ' · אומת גיאומטרית' : a.kind == AnchorVerifyKind.vision ? ' · אומת ראייה' : ''}',
           style: const TextStyle(color: Colors.white, fontSize: 13),
         ),
+        if (residual != null && !a.rejected)
+          Text(
+            suspect
+                ? '⚠ חשודה — סטייה ${residual.round()} מ׳ מהעקביות'
+                : 'סטייה ${residual.round()} מ׳ (בטווח)',
+            style: TextStyle(
+              color: suspect ? Colors.orangeAccent : Colors.white60,
+              fontSize: 12,
+              fontWeight: suspect ? FontWeight.bold : FontWeight.normal,
+            ),
+          ),
         if (!a.rejected) ...[
           const SizedBox(height: 6),
           // בחירת צד-הגרירה (פותר נקודה-על-נקודה): גוררים את הצד שנבחר.
@@ -586,6 +748,32 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                 onPressed: () => setState(() => a.rejected = true),
                 icon: const Icon(Icons.close),
                 label: const Text('פסול'),
+              ),
+            // תיקון גיאומטרי א' — יישור לעקביות (בלי OSM).
+            if (!a.rejected && _activeIdx.length >= 4)
+              FilledButton.tonalIcon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: suspect ? Colors.amber[200] : null,
+                ),
+                onPressed: () => _snapToConsensus(sel),
+                icon: const Icon(Icons.auto_fix_high),
+                label: const Text('יישר לעקביות'),
+              ),
+            // תיקון גיאומטרי ב' — הצמד לצומת-OSM הקרוב (כשנטען).
+            if (!a.rejected && _osmJunctions.isNotEmpty)
+              FilledButton.tonalIcon(
+                onPressed: () => _snapToJunction(sel),
+                icon: const Icon(Icons.my_location),
+                label: const Text('הצמד לצומת'),
+              )
+            else if (!a.rejected && _osmLoading)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                child: SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
               ),
             // עריכת צד-הסריקה בזום מדויק (חלופה לגרירה על המפה).
             FilledButton.tonalIcon(
