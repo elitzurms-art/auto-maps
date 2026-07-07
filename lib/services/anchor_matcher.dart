@@ -644,6 +644,127 @@ class AnchorMatcher {
     return out;
   }
 
+  /// רישום מבוסס-קווים: מתאים את **קווי-הכביש כווקטורים** (לא נקודות
+  /// מבודדות). כביש ארוך = וקטור מכוון (התחלה→סוף) שנותן כיוון+קנה-מידה+
+  /// הזזה מהתאמה **אחת** — הכיוון נקבע מהוקטור, בלי הסימטריה שהרגה את
+  /// התאמת-הנקודות. עבור K הקווים הארוכים בכל צד × שני כיוונים נבנית
+  /// טרנספורמציה, מדורגת לפי חפיפת-כבישים דו-כיוונית. מוחזרות השערות
+  /// מובחנות-זווית ממוינות (הטובה = החפיפה הנמוכה).
+  static Future<List<MatchHypothesis>> lineRegisterInIsolate({
+    required List<List<Point<double>>> scanLines,
+    required List<List<LatLng>> refLines,
+    required List<Point<double>> scanRoad,
+    required List<LatLng> refRoad,
+    int topK = 12,
+    int maxHypotheses = 5,
+  }) {
+    return Isolate.run(() => lineRegister(
+          scanLines: scanLines,
+          refLines: refLines,
+          scanRoad: scanRoad,
+          refRoad: refRoad,
+          topK: topK,
+          maxHypotheses: maxHypotheses,
+        ));
+  }
+
+  static List<MatchHypothesis> lineRegister({
+    required List<List<Point<double>>> scanLines,
+    required List<List<LatLng>> refLines,
+    required List<Point<double>> scanRoad,
+    required List<LatLng> refRoad,
+    int topK = 12,
+    int maxHypotheses = 5,
+  }) {
+    if (scanLines.length < 2 || refLines.length < 2) return const [];
+    if (scanRoad.length < 10 || refRoad.length < 10) return const [];
+    // מרכז-מטרים לפי צמתי-הכביש של הייחוס.
+    var lat0 = 0.0, lon0 = 0.0, n = 0;
+    for (final g in refRoad) {
+      lat0 += g.latitude;
+      lon0 += g.longitude;
+      n++;
+    }
+    lat0 /= n;
+    lon0 /= n;
+    final mLon = 111320.0 * cos(lat0 * pi / 180);
+    _C toM(LatLng g) =>
+        _C((g.longitude - lon0) * mLon, (g.latitude - lat0) * 111320.0);
+
+    // קצוות-קו כווקטור (y-מסך מהופך כמו בכל המַתאם).
+    (_C, _C, double) endpoints(List<Point<double>> line) {
+      final a = _C(line.first.x, -line.first.y);
+      final b = _C(line.last.x, -line.last.y);
+      return (a, b, (a - b).abs);
+    }
+
+    final scanSeg = [for (final l in scanLines) endpoints(l)]
+      ..sort((x, y) => y.$3.compareTo(x.$3));
+    final refSeg = <(_C, _C, double)>[];
+    for (final l in refLines) {
+      final a = toM(l.first), b = toM(l.last);
+      refSeg.add((a, b, (a - b).abs));
+    }
+    refSeg.sort((x, y) => y.$3.compareTo(x.$3));
+
+    final scanRoadC = [for (final p in scanRoad) _C(p.x, -p.y)];
+    final refRoadC = [for (final g in refRoad) toM(g)];
+    final scanRoadSpan = _span(scanRoadC), refRoadSpan = _span(refRoadC);
+    if (scanRoadSpan < 1 || refRoadSpan < 1) return const [];
+    final expScale = refRoadSpan / scanRoadSpan;
+
+    final sTop = scanSeg.take(topK).toList();
+    final rTop = refSeg.take(topK * 3).toList(); // ייחוס עשיר יותר בקווים
+
+    final scored = <(double, _C, _C)>[]; // (roadFit, a, b)
+    for (final s in sTop) {
+      if (s.$3 < scanRoadSpan * 0.12) continue; // קו קצר — לא יציב
+      for (final r in rTop) {
+        if (r.$3 < refRoadSpan * 0.06) continue;
+        for (final flip in [false, true]) {
+          final rA = flip ? r.$2 : r.$1;
+          final rB = flip ? r.$1 : r.$2;
+          final dz = s.$1 - s.$2;
+          final dw = rA - rB;
+          if (dz.abs2 < 1e-9) continue;
+          final a = dw / dz;
+          if (a.abs < expScale * 0.4 || a.abs > expScale * 2.5) continue;
+          final b = rA - a * s.$1;
+          scored.add((_roadFit(scanRoadC, refRoadC, a, b), a, b));
+        }
+      }
+    }
+    if (scored.isEmpty) return const [];
+    scored.sort((x, y) => x.$1.compareTo(y.$1));
+
+    // עידון ICP-כבישים על הטובים + אשכול-זווית.
+    final out = <MatchHypothesis>[];
+    for (final cand in scored.take(40)) {
+      final a = cand.$2, b = cand.$3;
+      final rot = atan2(a.im, a.re) * 180 / pi;
+      final dup = out.any((h) {
+        var d = (h.rotationDeg - rot).abs() % 360;
+        if (d > 180) d = 360 - d;
+        return d < 15;
+      });
+      if (dup) continue;
+      out.add(MatchHypothesis(
+        aRe: a.re,
+        aIm: a.im,
+        bRe: b.re,
+        bIm: b.im,
+        lat0: lat0,
+        lon0: lon0,
+        scaleMetersPerPx: a.abs,
+        rotationDeg: rot,
+        inliers: 0,
+        roadFitMeters: cand.$1,
+      ));
+      if (out.length >= maxHypotheses) break;
+    }
+    return out;
+  }
+
   /// שתי-משואות: זוג התאמות ידועות-סמנטית (למשל ירוק↔ירוק + כיכר↔כיכר)
   /// נותן טרנספורמציה **דטרמיניסטית** — בלי שום ניחוש-פיוס. עבור כל צירוף
   /// משואה-B (כיכרות: יתכנו כמה בכל צד) נבנית השערה, מעודנת ב-ICP,

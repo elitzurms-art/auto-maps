@@ -40,8 +40,12 @@ class OverpassService {
   /// לשבירת אמביגואיית-הסיבוב (חפיפת-כבישים במַתאם).
   final List<LatLng> roadPoints;
 
-  OverpassService._(
-      this.junctions, this.neighbors, this.isRoundabout, this.roadPoints);
+  /// קווי-כביש (פוליגונים לפי דרך) — צורת הרשת כווקטורים, לרישום
+  /// מבוסס-קווים (כביש ארוך יחיד נותן כיוון+קנה-מידה מהתאמה אחת).
+  final List<List<LatLng>> roadLines;
+
+  OverpassService._(this.junctions, this.neighbors, this.isRoundabout,
+      this.roadPoints, this.roadLines);
 
   /// שולף את רשת-הכבישים ב-[bbox], מחשב צמתים (client-side מ-`out geom`)
   /// ומאשכל צמתים קרובים (< [clusterMeters]). זורק על כשל-רשת.
@@ -95,6 +99,7 @@ class OverpassService {
     // נקודות-כביש (כל ~15מ') לאורך כל דרך — לחפיפת-הכבישים.
     final dist = const Distance();
     final roadPoints = <LatLng>[];
+    final roadLines = <List<LatLng>>[];
     final nodeCount = <int, int>{};
     final nodeCoord = <int, LatLng>{};
     final nodeAdj = <int, Set<int>>{};
@@ -103,6 +108,10 @@ class OverpassService {
       final ids = (w['nodes'] as List?)?.cast<int>();
       final geom = (w['geometry'] as List?)?.cast<Map<String, dynamic>>();
       if (ids == null || geom == null || ids.length != geom.length) continue;
+      roadLines.add([
+        for (final g in geom)
+          LatLng((g['lat'] as num).toDouble(), (g['lon'] as num).toDouble()),
+      ]);
       LatLng? prev;
       for (var i = 0; i < ids.length; i++) {
         final id = ids[i];
@@ -190,7 +199,8 @@ class OverpassService {
       isRoundabout.add(true);
     }
 
-    return OverpassService._(junctions, neighbors, isRoundabout, roadPoints);
+    return OverpassService._(
+        junctions, neighbors, isRoundabout, roadPoints, roadLines);
   }
 
   /// מרכז השטחים הירוקים ב-[bbox] (landuse/leisure) — "מצפן" אסימטרי

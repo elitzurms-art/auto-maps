@@ -23,12 +23,17 @@ enum MapFeatureKind {
 /// מועמד-עוגן שאותר אלגוריתמית: מיקום + סוג.
 typedef MapFeature = ({Point<double> pos, MapFeatureKind kind});
 
-/// תוצאת הגלאי: המאפיינים + דגימת נקודות-כביש (מהשלד, בפיקסלי-מקור) —
-/// צורת רשת-הכבישים, לשבירת אמביגואיית-הסיבוב בהתאמה.
+/// תוצאת הגלאי: מאפיינים + נקודות-כביש + **קווי-כביש** (פוליגונים מהשלד),
+/// הכל בפיקסלי-מקור. קווי-הכביש הם צורת הרשת כווקטורים — לרישום מבוסס-קווים.
 class DetectResult {
   final List<MapFeature> features;
   final List<Point<double>> roadPoints;
-  const DetectResult({required this.features, required this.roadPoints});
+  final List<List<Point<double>>> polylines;
+  const DetectResult({
+    required this.features,
+    required this.roadPoints,
+    this.polylines = const [],
+  });
 
   static const empty =
       DetectResult(features: <MapFeature>[], roadPoints: <Point<double>>[]);
@@ -263,6 +268,11 @@ class RoadJunctionDetector {
       roadPoints: [
         for (final p in res.roadPoints) Point(p.x * scale, p.y * scale),
       ],
+      // קווי-הכביש (פוליגונים), בפיקסלי-מקור.
+      polylines: [
+        for (final line in res.polylines)
+          [for (final p in line) Point(p.x * scale, p.y * scale)],
+      ],
     );
   }
 
@@ -398,10 +408,200 @@ class RoadJunctionDetector {
       }
     }
 
+    // מעקב-שלד לפוליגונים (קווי-כביש): מכל צומת/קצה עוקבים שרשרת-שלד עד
+    // הצומת/קצה הבא — כל מעקב = קו-כביש (רשימת נקודות). הכבישים כווקטורים
+    // מבחינים בהרבה מנקודות מבודדות ושוברים את אמביגואיית-הסיבוב.
+    final polylines = _traceSkeleton(skel, w, h);
+
     final junctions = _cluster(junctionPts, w, 16);
     final deadEnds = _cluster(deadEndPts, w, 16);
     final bends = _findBends(skel, w, h, junctionPts, strokeW);
-    return _BranchResult(junctions, deadEnds, bends, roundabouts, roadPts);
+    return _BranchResult(
+        junctions, deadEnds, bends, roundabouts, roadPts, polylines);
+  }
+
+  /// מעקב-שלד לפוליגונים: בונה גרף-שלד (דרגת-שכנים), ומכל קודקוד (דרגה≠2)
+  /// עוקב כל שרשרת-פיקסלים עד הקודקוד הבא. מחזיר קווים פשוטים (Douglas-
+  /// Peucker) באורך ≥ 4×רוחב-משיחה, בפיקסלי-המסכה.
+  static List<List<Point<double>>> _traceSkeleton(
+    Uint8List skel,
+    int w,
+    int h,
+  ) {
+    int deg(int p) {
+      final x = p % w, y = p ~/ w;
+      var d = 0;
+      for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+          if (dx == 0 && dy == 0) continue;
+          final nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          if (skel[ny * w + nx] == 1) d++;
+        }
+      }
+      return d;
+    }
+
+    // קודקודים = פיקסלי-שלד עם דרגה ≠ 2 (צומת ≥3, קצה =1).
+    final isNode = Uint8List(skel.length);
+    final nodes = <int>[];
+    for (var i = 0; i < skel.length; i++) {
+      if (skel[i] == 1) {
+        final d = deg(i);
+        if (d != 2) {
+          isNode[i] = 1;
+          nodes.add(i);
+        }
+      }
+    }
+
+    // מעקב שרשראות; מסמנים קצוות-שרשרת שביקרנו כדי לא לחזור.
+    final visitedEdge = <int>{}; // מפתח = p*len + q של הצעד הראשון
+    final out = <List<Point<double>>>[];
+    Point<double> pt(int p) => Point((p % w).toDouble(), (p ~/ w).toDouble());
+
+    for (final start in nodes) {
+      final sx = start % w, sy = start ~/ w;
+      for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+          if (dx == 0 && dy == 0) continue;
+          final nx = sx + dx, ny = sy + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          final first = ny * w + nx;
+          if (skel[first] == 0) continue;
+          final ekey = start * skel.length + first;
+          if (visitedEdge.contains(ekey)) continue;
+
+          // עוקבים לאורך השרשרת עד קודקוד.
+          final chain = <int>[start, first];
+          var prev = start, cur = first;
+          while (isNode[cur] == 0) {
+            final cx = cur % w, cy = cur ~/ w;
+            int next = -1;
+            for (var ddy = -1; ddy <= 1 && next < 0; ddy++) {
+              for (var ddx = -1; ddx <= 1; ddx++) {
+                if (ddx == 0 && ddy == 0) continue;
+                final ax = cx + ddx, ay = cy + ddy;
+                if (ax < 0 || ay < 0 || ax >= w || ay >= h) continue;
+                final q = ay * w + ax;
+                if (q != prev && q != cur && skel[q] == 1) {
+                  next = q;
+                  break;
+                }
+              }
+            }
+            if (next < 0) break;
+            chain.add(next);
+            prev = cur;
+            cur = next;
+          }
+          visitedEdge.add(ekey);
+          visitedEdge.add(cur * skel.length + chain[chain.length - 2]);
+          if (chain.length >= 4) {
+            out.add(_simplify([for (final p in chain) pt(p)], 2.5));
+          }
+        }
+      }
+    }
+    // תפירת-קווים דרך צמתים: כביש ממשיך ישר דרך הצטלבות. ממזג קטעים
+    // ששיתפו נקודת-קצה וממשיכים בזווית קטנה → כבישים ארוכים מבחינים.
+    return _mergeStrokes(out);
+  }
+
+  /// ממזג פוליגונים לקווים ארוכים ("strokes") לפי המשכיות-טובה: בכל
+  /// נקודת-קצה משותפת, מחבר את שני הקטעים בעלי הזווית הישרה ביותר.
+  static List<List<Point<double>>> _mergeStrokes(
+    List<List<Point<double>>> lines,
+  ) {
+    // אינדקס קצוות: מפתח מעוגל (2px) → רשימת (אינדקס-קו, האם-קצה-התחלה).
+    String key(Point<double> p) =>
+        '${(p.x / 2).round()},${(p.y / 2).round()}';
+    final ends = <String, List<(int, bool)>>{};
+    for (var i = 0; i < lines.length; i++) {
+      ends.putIfAbsent(key(lines[i].first), () => []).add((i, true));
+      ends.putIfAbsent(key(lines[i].last), () => []).add((i, false));
+    }
+
+    // כיוון-יציאה מקצה (וקטור מנורמל אל תוך הקו).
+    Point<double> dirAt(List<Point<double>> l, bool atStart) {
+      final a = atStart ? l.first : l.last;
+      final b = atStart ? l[1] : l[l.length - 2];
+      final dx = b.x - a.x, dy = b.y - a.y;
+      final n = sqrt(dx * dx + dy * dy);
+      return n < 1e-9 ? const Point(0.0, 0.0) : Point(dx / n, dy / n);
+    }
+
+    final used = List<bool>.filled(lines.length, false);
+    final out = <List<Point<double>>>[];
+    for (var start = 0; start < lines.length; start++) {
+      if (used[start]) continue;
+      var stroke = List<Point<double>>.from(lines[start]);
+      used[start] = true;
+      // מרחיבים לשני הקצוות.
+      for (final atEnd in [true, false]) {
+        while (true) {
+          final tip = atEnd ? stroke.last : stroke.first;
+          // כיוון-הגעה לקצה (המשך ישר = כיוון הפוך לכיוון-היציאה).
+          final incoming = atEnd
+              ? Point(
+                  stroke.last.x - stroke[stroke.length - 2].x,
+                  stroke.last.y - stroke[stroke.length - 2].y,
+                )
+              : Point(stroke.first.x - stroke[1].x, stroke.first.y - stroke[1].y);
+          final ni = sqrt(incoming.x * incoming.x + incoming.y * incoming.y);
+          if (ni < 1e-9) break;
+          final ix = incoming.x / ni, iy = incoming.y / ni;
+          // מועמדי-המשך בקצה הזה.
+          var bestJ = -1;
+          var bestStartEnd = true;
+          var bestDot = 0.5; // דורשים זווית < ~60° מהמשך-ישר
+          for (final (j, isStart) in ends[key(tip)] ?? const <(int, bool)>[]) {
+            if (used[j] || j == start) continue;
+            final d = dirAt(lines[j], isStart); // מצביע לתוך הקו
+            final dot = ix * d.x + iy * d.y; // המשך-ישר → ~1
+            if (dot > bestDot) {
+              bestDot = dot;
+              bestJ = j;
+              bestStartEnd = isStart;
+            }
+          }
+          if (bestJ < 0) break;
+          used[bestJ] = true;
+          final seg = bestStartEnd
+              ? lines[bestJ]
+              : lines[bestJ].reversed.toList();
+          if (atEnd) {
+            stroke.addAll(seg.skip(1));
+          } else {
+            stroke = [...seg.reversed.skip(1).toList().reversed, ...stroke];
+          }
+        }
+      }
+      out.add(_simplify(stroke, 2.5));
+    }
+    return out;
+  }
+
+  /// Douglas-Peucker — פישוט פוליגון תוך שמירת צורתו.
+  static List<Point<double>> _simplify(List<Point<double>> pts, double eps) {
+    if (pts.length < 3) return pts;
+    var maxD = 0.0, idx = 0;
+    final a = pts.first, b = pts.last;
+    final dx = b.x - a.x, dy = b.y - a.y;
+    final len = sqrt(dx * dx + dy * dy);
+    for (var i = 1; i < pts.length - 1; i++) {
+      final d = len < 1e-9
+          ? sqrt(pow(pts[i].x - a.x, 2) + pow(pts[i].y - a.y, 2))
+          : ((pts[i].x - a.x) * dy - (pts[i].y - a.y) * dx).abs() / len;
+      if (d > maxD) {
+        maxD = d;
+        idx = i;
+      }
+    }
+    if (maxD <= eps) return [a, b];
+    final left = _simplify(pts.sublist(0, idx + 1), eps);
+    final right = _simplify(pts.sublist(idx), eps);
+    return [...left.sublist(0, left.length - 1), ...right];
   }
 
   /// כיכרות מלאות: רכיבי ליבת-הגושים שהם קטנים ועגולים. עיגול ממלא ~π/4
@@ -937,13 +1137,14 @@ class _Cluster {
   _Cluster(this.cx, this.cy, this.weight);
 }
 
-/// תוצאת ענף אחד של הצנרת — מאפיינים לפי סוג + דגימת נקודות-כביש.
+/// תוצאת ענף אחד של הצנרת — מאפיינים לפי סוג + נקודות-כביש + קווי-כביש.
 class _BranchResult {
   final List<_Cluster> junctions, deadEnds, bends, roundabouts;
   final List<Point<double>> roadPoints;
+  final List<List<Point<double>>> polylines;
   const _BranchResult(this.junctions, this.deadEnds, this.bends,
-      this.roundabouts, this.roadPoints);
+      this.roundabouts, this.roadPoints, this.polylines);
 
   static const empty = _BranchResult(<_Cluster>[], <_Cluster>[], <_Cluster>[],
-      <_Cluster>[], <Point<double>>[]);
+      <_Cluster>[], <Point<double>>[], <List<Point<double>>>[]);
 }
