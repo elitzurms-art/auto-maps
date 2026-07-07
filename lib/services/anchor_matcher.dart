@@ -644,6 +644,164 @@ class AnchorMatcher {
     return out;
   }
 
+  /// רישום **נעול-סיבוב** (המפה כבר מיושרת-צפון — ידע מהמשתמש): פותר רק
+  /// קנה-מידה+הזזה, בלי סיבוב. זה מבטל לחלוטין את אמביגואיית-הסיבוב
+  /// (שורש כל הכשלים על עיר-רשת). RANSAC על זוגות-צמתים שכיוונם מקביל
+  /// (בלי סיבוב, כיוון-סריקה = כיוון-עולם); הטרנספורמציה a=s (ממשי חיובי).
+  /// עיוות-מפה סכמטי נשאר כשארית (המשתמש מתקן פר-נקודה / TPS) — אבל
+  /// האוריינטציה והמיקום נכונים.
+  static Future<MatchResult?> registerNorthUpInIsolate({
+    required List<Point<double>> scanPx,
+    required List<LatLng> refGeo,
+    List<bool>? scanRound,
+    List<bool>? refRound,
+    List<Point<double>>? scanRoad,
+    List<LatLng>? refRoad,
+  }) {
+    return Isolate.run(() => registerNorthUp(
+          scanPx: scanPx,
+          refGeo: refGeo,
+          scanRound: scanRound,
+          refRound: refRound,
+          scanRoad: scanRoad,
+          refRoad: refRoad,
+        ));
+  }
+
+  static MatchResult? registerNorthUp({
+    required List<Point<double>> scanPx,
+    required List<LatLng> refGeo,
+    List<bool>? scanRound,
+    List<bool>? refRound,
+    List<Point<double>>? scanRoad,
+    List<LatLng>? refRoad,
+    int minInliers = 4,
+    int iterations = 200000,
+    int seed = 7,
+  }) {
+    if (scanPx.length < minInliers || refGeo.length < minInliers) return null;
+    var lat0 = 0.0, lon0 = 0.0;
+    for (final g in refGeo) {
+      lat0 += g.latitude;
+      lon0 += g.longitude;
+    }
+    lat0 /= refGeo.length;
+    lon0 /= refGeo.length;
+    final mLon = 111320.0 * cos(lat0 * pi / 180);
+    _C toM(LatLng g) =>
+        _C((g.longitude - lon0) * mLon, (g.latitude - lat0) * 111320.0);
+    final ref = [for (final g in refGeo) toM(g)];
+    final scan = [for (final p in scanPx) _C(p.x, -p.y)]; // y-מסך מהופך
+
+    final scanSpan = _span(scan), refSpan = _span(ref);
+    if (scanSpan < 1 || refSpan < 1) return null;
+    final expScale = refSpan / scanSpan;
+    // סף-inlier בפיקסלי-סריקה × קנה-מידה (כמו בשאר המַתאם).
+    final thrPx = scanSpan * 0.02;
+
+    final rng = Random(seed);
+    var bestS = expScale, bestInl = -1;
+    _C bestB = ref.first - scan.first * _C(expScale, 0);
+    for (var iter = 0; iter < iterations; iter++) {
+      final i = rng.nextInt(scan.length), k = rng.nextInt(scan.length);
+      if (i == k) continue;
+      final dz = scan[i] - scan[k];
+      if (dz.abs < scanSpan * 0.1) continue;
+      final j = rng.nextInt(ref.length), l = rng.nextInt(ref.length);
+      if (j == l) continue;
+      final dw = ref[j] - ref[l];
+      if (dw.abs < 1) continue;
+      // כיוון מקביל (סיבוב 0): הזווית בין dz ל-dw קטנה.
+      final cosang = (dz.re * dw.re + dz.im * dw.im) / (dz.abs * dw.abs);
+      if (cosang < 0.985) continue; // < ~10°
+      final s = dw.abs / dz.abs;
+      if (s < expScale * 0.4 || s > expScale * 2.5) continue;
+      final b = ref[j] - scan[i] * _C(s, 0);
+      final thr2 = pow(thrPx * s, 2).toDouble();
+      var inl = 0;
+      for (final z in scan) {
+        final w = z * _C(s, 0) + b;
+        var best = double.infinity;
+        for (final r in ref) {
+          final d2 = (w - r).abs2;
+          if (d2 < best) best = d2;
+        }
+        if (best <= thr2) inl++;
+      }
+      if (inl > bestInl) {
+        bestInl = inl;
+        bestS = s;
+        bestB = b;
+      }
+    }
+    if (bestInl < minInliers) return null;
+
+    // עידון ICP נעול-סיבוב: קנה-מידה סקלרי + הזזה מ-least-squares.
+    var s = bestS, b = bestB;
+    final thr2 = pow(thrPx * s, 2).toDouble();
+    for (var round = 0; round < 4; round++) {
+      // התכתבות nearest.
+      final pairs = <(int, int)>[];
+      final usedR = <int>{};
+      final cand = <(double, int, int)>[];
+      for (var si = 0; si < scan.length; si++) {
+        final w = scan[si] * _C(s, 0) + b;
+        for (var ri = 0; ri < ref.length; ri++) {
+          if (scanRound != null &&
+              refRound != null &&
+              scanRound[si] != refRound[ri]) {
+            continue;
+          }
+          final d2 = (w - ref[ri]).abs2;
+          if (d2 <= thr2) cand.add((d2, si, ri));
+        }
+      }
+      cand.sort((x, y) => x.$1.compareTo(y.$1));
+      final usedS = <int>{};
+      for (final c in cand) {
+        if (usedS.contains(c.$2) || usedR.contains(c.$3)) continue;
+        usedS.add(c.$2);
+        usedR.add(c.$3);
+        pairs.add((c.$2, c.$3));
+      }
+      if (pairs.length < minInliers) break;
+      // least-squares: s (סקלרי) + b. minimize Σ|s·z_i + b - w_i|².
+      var zc = const _C(0, 0), wc = const _C(0, 0);
+      for (final p in pairs) {
+        zc = zc + scan[p.$1];
+        wc = wc + ref[p.$2];
+      }
+      final nP = pairs.length.toDouble();
+      zc = _C(zc.re / nP, zc.im / nP);
+      wc = _C(wc.re / nP, wc.im / nP);
+      var num = 0.0, den = 0.0;
+      for (final p in pairs) {
+        final zp = scan[p.$1] - zc, wp = ref[p.$2] - wc;
+        num += zp.re * wp.re + zp.im * wp.im;
+        den += zp.abs2;
+      }
+      if (den < 1e-9) break;
+      s = num / den;
+      b = wc - zc * _C(s, 0);
+    }
+
+    return buildResult(
+      scanPx: scanPx,
+      refGeo: refGeo,
+      scanRound: scanRound,
+      refRound: refRound,
+      // a = s ממשי; y-מסך מהופך מטופל ב-buildResult דרך אותו קונבנציה?
+      // buildResult משתמש ב-scan=_C(x,y) בלי היפוך — לכן מעבירים a,b
+      // בקונבנציית y-לא-מהופך: היפוך-y שקול ל-conjugate. a נשאר ממשי (s),
+      // b_y מתהפך.
+      aRe: s,
+      aIm: 0,
+      bRe: b.re,
+      bIm: b.im,
+      minInliers: minInliers,
+    );
+  }
+
   /// רישום מבוסס-קווים: מתאים את **קווי-הכביש כווקטורים** (לא נקודות
   /// מבודדות). כביש ארוך = וקטור מכוון (התחלה→סוף) שנותן כיוון+קנה-מידה+
   /// הזזה מהתאמה **אחת** — הכיוון נקבע מהוקטור, בלי הסימטריה שהרגה את

@@ -353,8 +353,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     if (!mounted) return;
 
     // רמז-מיקום — מנחה את איתור האזור (שלב הג'יאוקודינג); null = ביטול.
-    final hint = await _promptAreaHint();
-    if (hint == null || !mounted) return;
+    final opts = await _promptAreaHint();
+    if (opts == null || !mounted) return;
 
     setState(() => _aiBusy = true);
     try {
@@ -363,7 +363,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         imageWidth: _imageWidth,
         imageHeight: _imageHeight,
         apiKey: key,
-        areaHint: hint.isEmpty ? null : hint,
+        areaHint: opts.hint.isEmpty ? null : opts.hint,
+        northUp: opts.northUp,
         onStatus: (status) {
           if (!mounted) return;
           ScaffoldMessenger.of(context)
@@ -465,54 +466,72 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
 
   /// דיאלוג רמז-מיקום לפני ההרצה. מחזיר את הטקסט ('' = בלי רמז) או null
   /// בביטול. הרמז נשמר לפריפיל בהרצה הבאה.
-  Future<String?> _promptAreaHint() async {
+  Future<({String hint, bool northUp})?> _promptAreaHint() async {
     final ctrl = TextEditingController(
       text: await GeminiAnchorService.getAreaHint() ?? '',
     );
     if (!mounted) return null;
-    final hint = await showDialog<String>(
+    var northUp = true; // רוב מפות-היישוב מיושרות-צפון
+    final result = await showDialog<({String hint, bool northUp})>(
       context: context,
       builder: (ctx) => Directionality(
         textDirection: TextDirection.rtl,
-        child: AlertDialog(
-          title: const Text('רמז מיקום (אופציונלי)'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'שם היישוב/האזור של המפה עוזר ל-AI לאתר את האזור '
-                'במפה ובלוויין לפני התאמת הנקודות.',
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: ctrl,
-                autofocus: true,
-                decoration: const InputDecoration(
-                  labelText: 'למשל: נוב רמת הגולן',
-                  border: OutlineInputBorder(),
+        child: StatefulBuilder(
+          builder: (ctx, setDlg) => AlertDialog(
+            title: const Text('רמז מיקום (אופציונלי)'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'שם היישוב/האזור של המפה עוזר לאתר את האזור לפני '
+                  'התאמת הנקודות.',
                 ),
-                onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: ctrl,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                    labelText: 'למשל: נוב רמת הגולן',
+                    border: OutlineInputBorder(),
+                  ),
+                  onSubmitted: (v) =>
+                      Navigator.pop(ctx, (hint: v.trim(), northUp: northUp)),
+                ),
+                CheckboxListTile(
+                  value: northUp,
+                  onChanged: (v) => setDlg(() => northUp = v ?? true),
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: const Text('המפה מיושרת לצפון (צפון למעלה)'),
+                  subtitle: const Text(
+                    'מומלץ למפות יישוב — התאמה מהירה ומדויקת בהרבה. '
+                    'בטל רק אם המפה מסובבת.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('ביטול'),
+              ),
+              ElevatedButton.icon(
+                onPressed: () => Navigator.pop(
+                    ctx, (hint: ctrl.text.trim(), northUp: northUp)),
+                icon: const Icon(Icons.auto_awesome),
+                label: const Text('הרץ'),
               ),
             ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('ביטול'),
-            ),
-            ElevatedButton.icon(
-              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-              icon: const Icon(Icons.auto_awesome),
-              label: const Text('הרץ'),
-            ),
-          ],
         ),
       ),
     );
-    if (hint != null && hint.isNotEmpty) {
-      await GeminiAnchorService.setAreaHint(hint);
+    if (result != null && result.hint.isNotEmpty) {
+      await GeminiAnchorService.setAreaHint(result.hint);
     }
-    return hint;
+    return result;
   }
 
   /// אישור/דחייה של הצעת-עוגן בודדת — הלב של "אישור פר-נקודה".

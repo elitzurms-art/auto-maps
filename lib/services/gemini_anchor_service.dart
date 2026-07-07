@@ -177,6 +177,7 @@ class GeminiAnchorService {
     required String apiKey,
     String? areaHint,
     int? maxAnchors,
+    bool northUp = false,
     void Function(String status)? onStatus,
   }) async {
     final bytes = await File(imagePath).readAsBytes();
@@ -264,12 +265,14 @@ class GeminiAnchorService {
           scanRound: scanRound,
           roadPointsScan: roadPointsScan,
           areaHint: areaHint.trim(),
+          northUp: northUp,
         );
         if (classical != null && classical.length >= 4) {
-          // סינון-שיורי צמוד (40מ') — עוגנים קלאסיים אמורים להתלכד היטב
-          // על affine אחד; מה שסוטה הוא החלפת-נקודות ונזרק.
+          // סינון-שיורי: במצב north-up המפה עשויה להיות סכמטית (עיוות
+          // אמיתי) — סף רחב (90מ') שלא יזרוק עוגנים תקינים; אחרת צמוד
+          // (40מ') כי מה שסוטה הוא החלפת-נקודות.
           _applyGeometricConsistency(classical, imageWidth, imageHeight,
-              maxResidualMeters: 40);
+              maxResidualMeters: northUp ? 90 : 40);
           final kept = classical.where((s) => s.verified != false).toList();
           if (kept.length >= 4) return kept;
         }
@@ -901,6 +904,7 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     required List<bool> scanRound,
     required List<Point<double>> roadPointsScan,
     required String areaHint,
+    bool northUp = false,
   }) async {
     // bbox צמוד ליישוב — ריפוד רחב בולע יישוב שכן עם רשת-כבישים דומה
     // וגורם להתאמות-שווא (נצפה: נקודות נחתו בחיספין במקום בנוב).
@@ -917,17 +921,27 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     ));
     if (osm.junctions.length < 4) return null;
 
-    // נקודות-הכביש מפעילות את שער חפיפת-הכבישים: על מפה סכמטית שסוטה
-    // מ-OSM, החפיפה גרועה → matchInIsolate מחזיר null → נפילה-חזרה ל-AI
-    // (במקום להציג רישום-זבל "כמעט אבל לא").
-    final res = await AnchorMatcher.matchInIsolate(
-      scanPx: junctionPx,
-      refGeo: osm.junctions,
-      scanRound: scanRound,
-      refRound: osm.isRoundabout,
-      scanRoad: roadPointsScan.isEmpty ? null : roadPointsScan,
-      refRoad: osm.roadPoints,
-    );
+    // [northUp]: המשתמש מאשר שהמפה מיושרת-צפון → רישום נעול-סיבוב (רק
+    // קנה-מידה+הזזה). זה מבטל את אמביגואיית-הסיבוב לחלוטין ועובד גם על
+    // מפות סכמטיות (העיוות נשאר כשארית, נסגר באישור-פר-נקודה/TPS).
+    // אחרת: matchInIsolate עם שער חפיפת-כבישים (דוחה מפה סכמטית → AI).
+    final res = northUp
+        ? await AnchorMatcher.registerNorthUpInIsolate(
+            scanPx: junctionPx,
+            refGeo: osm.junctions,
+            scanRound: scanRound,
+            refRound: osm.isRoundabout,
+            scanRoad: roadPointsScan.isEmpty ? null : roadPointsScan,
+            refRoad: osm.roadPoints,
+          )
+        : await AnchorMatcher.matchInIsolate(
+            scanPx: junctionPx,
+            refGeo: osm.junctions,
+            scanRound: scanRound,
+            refRound: osm.isRoundabout,
+            scanRoad: roadPointsScan.isEmpty ? null : roadPointsScan,
+            refRoad: osm.roadPoints,
+          );
     // דורשים יחס-inliers סביר — מגן מפני התאמה-חלקית מקרית.
     final minReq = max(4, (junctionPx.length * 0.35).round());
     if (res == null || res.inliers < minReq) return null;
