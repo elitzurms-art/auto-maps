@@ -13,8 +13,8 @@ import '../services/ai_engine.dart';
 import '../services/gdal_warp_service.dart';
 import '../services/gemini_anchor_service.dart';
 import '../services/reference_map_controller.dart';
-import '../services/road_junction_detector.dart';
 import '../services/world_file_parser_service.dart';
+import 'adjust_verify_screen.dart';
 
 /// נקודת התאמה — pixel על התמונה + world על המפה
 class _ControlPoint {
@@ -96,10 +96,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   bool _aiBusy = false;
   bool _warping = false;
 
-  // מאפיינים מהגלאי המקומי (עיבוד-תמונה, בלי AI): צמתים, קצוות-דרך,
-  // מבנים, עיקולים — לחיצה על סמן נועצת נקודה.
-  List<({Offset pos, String label})> _cvCandidates = [];
-  bool _cvBusy = false;
 
   @override
   void initState() {
@@ -258,86 +254,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   // ═══ גלאי הצמתים המקומי (בלי AI, בלי רשת) ═══
 
   /// מציג/מסתיר את צמתי-הגלאי על התמונה. הריצה ב-Isolate (הדילול כבד).
-  Future<void> _toggleCvCandidates() async {
-    if (_cvBusy) return;
-    if (_cvCandidates.isNotEmpty) {
-      setState(() => _cvCandidates = []);
-      return;
-    }
-    setState(() => _cvBusy = true);
-    try {
-      final pts =
-          await RoadJunctionDetector.detectFileInIsolate(widget.imagePath);
-      if (!mounted) return;
-      setState(() {
-        _cvCandidates = [
-          for (final c in pts)
-            (
-              pos: Offset(c.pos.x, c.pos.y),
-              label: RoadJunctionDetector.kindLabel(c.kind),
-            ),
-        ];
-      });
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(
-              pts.isEmpty
-                  ? 'לא אותרו מאפיינים בעיבוד-תמונה (ניגודיות חלשה?)'
-                  : 'אותרו ${pts.length} מאפיינים (עיבוד מקומי, בלי AI) — '
-                        'לחיצה על סמן כחלחל נועצת שם נקודה',
-            ),
-            duration: const Duration(seconds: 5),
-          ),
-        );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(SnackBar(content: Text('איתור צמתים נכשל: $e')));
-    } finally {
-      if (mounted) setState(() => _cvBusy = false);
-    }
-  }
-
-  /// סמני מאפייני-הגלאי (טורקיז) על התמונה; לחיצה נועצת נקודה בפיקסל
-  /// המדויק, ריחוף מציג את הסוג (צומת / קצה דרך / מבנה / עיקול).
-  List<Widget> _buildCvMarkers() {
-    final scale = _displayScale;
-    return _cvCandidates.map((c) {
-      return Positioned(
-        left: c.pos.dx * scale - 10,
-        top: c.pos.dy * scale - 10,
-        child: GestureDetector(
-          onTap: () => _pickOnImage(c.pos),
-          child: Tooltip(
-            message: c.label,
-            child: Container(
-              width: 20,
-              height: 20,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: Colors.teal.withValues(alpha: 0.25),
-                border: Border.all(color: Colors.teal, width: 2),
-              ),
-              child: Center(
-                child: Container(
-                  width: 4,
-                  height: 4,
-                  decoration: const BoxDecoration(
-                    color: Colors.teal,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-    }).toList();
-  }
-
   // ═══ מצב אוטומטי — הצעת עוגנים (Gemini) ═══
 
   Future<void> _runAiSuggest() async {
@@ -378,36 +294,50 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         },
       );
       if (!mounted) return;
-      // הצעות שנדחו באימות הן רעש — לא מוצגות; מדווחות רק במונה.
-      final rejected = suggestions.where((s) => s.verified == false).length;
-      final shown = suggestions.where((s) => s.verified != false).toList();
-      setState(() {
-        _suggestions = shown;
-        _isOnMap = false; // ההצעות מוצגות על התמונה
-      });
-      final verifiedCount = shown.where((s) => s.verified == true).length;
-      final fallbackNote = GeminiAnchorService.usingFallbackModel
-          ? '\n⚠ רץ על מודל חלופי (${GeminiAnchorService.activeModel}) — '
-                'המכסה של המודל הראשי נגמרה; הדיוק עלול להיות נמוך יותר'
-          : '';
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(
-              (shown.isEmpty
-                      ? 'לא נמצאו עוגנים שעברו אימות'
-                            '${rejected > 0 ? ' ($rejected נדחו)' : ''} — '
-                            'נעץ ידנית'
-                      : 'נתקבלו ${shown.length} הצעות '
-                            '($verifiedCount אומתו'
-                            '${rejected > 0 ? ', $rejected נדחו והוסתרו' : ''}'
-                            ') — לחץ על סמן סגול לאישור') +
-                  fallbackNote,
+      // עוגנים שנדחו כבר באימות מסומנים verified:false — המסך החדש
+      // יראה אותם פסולים-כברירת-מחדל (המשתמש יכול לשחזר).
+      final usable = suggestions.where((s) => s.verified != false).toList();
+      if (usable.length < 3) {
+        final rejected = suggestions.length - usable.length;
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(
+            SnackBar(
+              content: Text('לא נמצאו מספיק עוגנים'
+                  '${rejected > 0 ? ' ($rejected נדחו)' : ''} — נעץ ידנית'),
+              duration: const Duration(seconds: 6),
             ),
-            duration: const Duration(seconds: 8),
+          );
+        return;
+      }
+      ScaffoldMessenger.of(context).clearSnackBars();
+      // מסך "כוונון ואישור" — בד-שילוב יחיד, הכל מאושר כברירת-מחדל.
+      final approved =
+          await Navigator.push<List<({Offset pixel, LatLng world})>>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => AdjustVerifyScreen(
+            imagePath: widget.imagePath,
+            imageWidth: _imageWidth,
+            imageHeight: _imageHeight,
+            suggestions: suggestions,
+            refMap: _refMap,
           ),
-        );
+        ),
+      );
+      if (!mounted || approved == null || approved.length < 3) return;
+      setState(() {
+        _points
+          ..clear()
+          ..addAll([
+            for (final a in approved) _ControlPoint(pixel: a.pixel)..world = a.world,
+          ]);
+        _suggestions = [];
+        _isOnMap = false;
+        _result = null;
+      });
+      _calculate();
+      if (_result != null) await _confirm();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
@@ -898,28 +828,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         appBar: AppBar(
           title: Text('ג\'יאורפרנס ($_completeCount / $_minPoints נקודות)'),
           actions: [
-            // גלאי צמתים מקומי — עובד גם בלי AI/רשת/מכסה
-            _cvBusy
-                ? const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 14),
-                    child: Center(
-                      child: SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    ),
-                  )
-                : IconButton(
-                    icon: Icon(
-                      Icons.hub_outlined,
-                      color: _cvCandidates.isNotEmpty ? Colors.teal : null,
-                    ),
-                    tooltip: _cvCandidates.isNotEmpty
-                        ? 'הסתר צמתים שאותרו'
-                        : 'אתר צמתים (מקומי, בלי AI)',
-                    onPressed: _toggleCvCandidates,
-                  ),
             // מצב אוטומטי — הצעת עוגנים מ-Gemini עם אישור פר-נקודה
             _aiBusy
                 ? const Padding(
@@ -1140,8 +1048,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                   ..._buildImageMarkers(),
                   // הצעות AI סגולות — ממתינות לאישור פר-נקודה
                   ..._buildSuggestionMarkers(),
-                  // צמתים מהגלאי המקומי — לחיצה נועצת נקודה
-                  ..._buildCvMarkers(),
                 ],
               ),
             ),
