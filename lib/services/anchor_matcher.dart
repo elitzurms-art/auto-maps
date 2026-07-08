@@ -849,6 +849,7 @@ class AnchorMatcher {
     List<Point<double>>? scanRoad,
     List<LatLng>? refRoad,
     double? maxRotationDeg,
+    double centerRotationDeg = 0,
   }) {
     return Isolate.run(() => registerSweep(
           scanPx: scanPx,
@@ -860,6 +861,7 @@ class AnchorMatcher {
           scanRoad: scanRoad,
           refRoad: refRoad,
           maxRotationDeg: maxRotationDeg,
+          centerRotationDeg: centerRotationDeg,
         ));
   }
 
@@ -873,6 +875,7 @@ class AnchorMatcher {
     List<Point<double>>? scanRoad,
     List<LatLng>? refRoad,
     double? maxRotationDeg,
+    double centerRotationDeg = 0,
     int minInliers = 4,
     int seed = 7,
   }) {
@@ -1011,11 +1014,13 @@ class AnchorMatcher {
     }
 
     // טווח-הסריקה: מלא (0–359) לזווית לא-ידועה, או **צמוד** (±maxRotationDeg
-    // סביב 0) ל"בערך-צפון" — תופס סיבוב-קטן (מצפן ~10-15°) בלי אמביגואיית-
-    // ה-180° של רשת. עידון (±9°) סביב הטוב בצעדי 1°.
+    // סביב [centerRotationDeg]) — "בערך-צפון" (מרכז 0) או **סביב זווית
+    // חץ-הצפון** שהמודל קרא. תופס את הסיבוב בלי אמביגואיית-ה-180° של רשת.
+    // עידון (±9°) סביב הטוב בצעדי 1°.
+    final c = centerRotationDeg.round();
     final coarseStep = maxRotationDeg != null ? 2 : 10;
-    final coarseFrom = maxRotationDeg != null ? -maxRotationDeg.round() : 0;
-    final coarseTo = maxRotationDeg != null ? maxRotationDeg.round() : 350;
+    final coarseFrom = maxRotationDeg != null ? c - maxRotationDeg.round() : 0;
+    final coarseTo = maxRotationDeg != null ? c + maxRotationDeg.round() : 350;
     for (var deg = coarseFrom; deg <= coarseTo; deg += coarseStep) {
       if (sweepDebug) {
         final r = tryAngle(deg.toDouble());

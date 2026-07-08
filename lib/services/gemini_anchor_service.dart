@@ -197,6 +197,8 @@ class GeminiAnchorService {
     String? areaHint,
     int? maxAnchors,
     bool northUp = false,
+    bool exactNorth = false,
+    double? compassDeg,
     void Function(String status)? onStatus,
   }) async {
     final bytes = await File(imagePath).readAsBytes();
@@ -308,6 +310,8 @@ class GeminiAnchorService {
             scanRound: scanRound,
             roadPointsScan: roadPointsScan,
             areaHint: effectiveHint,
+            exactNorth: exactNorth,
+            compassDeg: compassDeg,
           );
         } else {
           // מפה מסובבת: מיישרים אותה (deskew) → מזהים על גרסה צירית
@@ -567,6 +571,76 @@ class GeminiAnchorService {
             'סוטה ~${worst.round()}מ\' מהטרנספורמציה של שאר העוגנים',
       );
       // ממשיכים לסבב נוסף — אולי החריג הסתיר חריג נוסף.
+    }
+  }
+
+  /// קורא את זווית **חץ-הצפון / שושנת-הרוחות** מהמפה — משימה סמנטית פשוטה
+  /// (מתאים גם למודל-מקומי, בניגוד להתאמה המרחבית). מחזיר את הכיוון שאליו
+  /// מצביע הצפון, במעלות **בכיוון-השעון ממעלה** (0=מעלה, 90=ימין, 180=מטה,
+  /// 270=שמאל) = זווית-הסיבוב של המפה. null אם אין מצפן / כשל.
+  Future<double?> readCompassAngle({
+    required List<int> jpeg,
+    required String apiKey,
+  }) async {
+    const prompt = '''
+במפה שלפניך יש (אולי) חץ-צפון או שושנת-רוחות (לרוב עם האות N / צפון).
+אם יש — קבע לאיזה כיוון מצביע הצפון, במעלות עם כיוון-השעון ממעלה:
+0=למעלה, 90=ימינה, 180=למטה, 270=שמאלה. דיוק של ±10° מספיק.
+אם אין מצפן/חץ-צפון במפה — החזר found=false.''';
+    final body = {
+      'contents': [
+        {
+          'parts': [
+            {'text': prompt},
+            {
+              'inline_data': {
+                'mime_type': 'image/jpeg',
+                'data': base64Encode(jpeg),
+              },
+            },
+          ],
+        },
+      ],
+      'generationConfig': {
+        'response_mime_type': 'application/json',
+        'response_schema': {
+          'type': 'OBJECT',
+          'properties': {
+            'found': {'type': 'BOOLEAN'},
+            'northAngleDeg': {'type': 'NUMBER'},
+          },
+          'required': ['found', 'northAngleDeg'],
+        },
+      },
+    };
+    final text = await _generate(body, apiKey);
+    final root = jsonDecode(text) as Map<String, dynamic>;
+    if (root['found'] != true) return null;
+    final ang = (root['northAngleDeg'] as num?)?.toDouble();
+    return ang;
+  }
+
+  /// נוחות ל-UI: טוען את התמונה, מקטין לצלע-מקסימום 1600px, וקורא את
+  /// זווית-המצפן. מחזיר null אם אין מצפן / כשל. חריגים נתפסים כאן
+  /// (רשת/מפתח) → null, כדי שהזרימה תיפול חלק לבחירה-ידנית.
+  Future<double?> detectCompass({
+    required String imagePath,
+    required String apiKey,
+  }) async {
+    try {
+      final bytes = await File(imagePath).readAsBytes();
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) return null;
+      var sent = decoded;
+      if (decoded.width > 1600 || decoded.height > 1600) {
+        sent = decoded.width >= decoded.height
+            ? img.copyResize(decoded, width: 1600)
+            : img.copyResize(decoded, height: 1600);
+      }
+      final jpeg = img.encodeJpg(sent, quality: 85);
+      return await readCompassAngle(jpeg: jpeg, apiKey: apiKey);
+    } catch (_) {
+      return null;
     }
   }
 
@@ -1060,6 +1134,8 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     required List<bool> scanRound,
     required List<Point<double>> roadPointsScan,
     required String areaHint,
+    bool exactNorth = false,
+    double? compassDeg,
     Offset Function(Offset)? unmapPixel,
     int? cropW,
     int? cropH,
@@ -1094,10 +1170,26 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     final refGeo = osm.junctions;
     final deskewMode = cropW != null && cropH != null;
     final quarters = deskewMode ? 4 : 1;
-    final rotWindow = deskewMode ? 12.0 : 20.0;
     Point<double> rotK(Point<double> p, int k) => deskewMode
         ? _rot90(p, k, cropW.toDouble(), cropH.toDouble())
         : p;
+
+    // מצבי-כיוון (מסלול ישיר): מצפן → חלון ±15° סביב הזווית שנקראה (וגם
+    // סביב שלילתה — סימן-הקריאה לא ודאי); צפון-מדויק → ±2°; אחרת בערך-צפון
+    // ±20°. deskew → ±12° סביב 0 (השארית אחרי היישור).
+    // כל איבר: (מרכז-הזווית, ±חלון).
+    final attempts = <(double, double)>[
+      if (deskewMode)
+        (0.0, 12.0)
+      else if (compassDeg != null) ...[
+        (compassDeg, 15.0),
+        (-compassDeg, 15.0),
+      ] else if (exactNorth)
+        (0.0, 2.0)
+      else
+        (0.0, 20.0),
+    ];
+
     MatchResult? res;
     var bestK = 0;
     for (var k = 0; k < quarters; k++) {
@@ -1106,18 +1198,21 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
       final rr = deskewMode
           ? [for (final r in roadPointsScan) rotK(r, k)]
           : roadPointsScan;
-      final r = await AnchorMatcher.registerSweepInIsolate(
-        scanPx: scanCombined,
-        refGeo: refGeo,
-        scanRound: scanRound,
-        refRound: osm.isRoundabout,
-        scanRoad: rr.isEmpty ? null : rr,
-        refRoad: osm.roadPoints,
-        maxRotationDeg: rotWindow,
-      );
-      if (r != null && (res == null || r.inliers > res.inliers)) {
-        res = r;
-        bestK = k;
+      for (final att in attempts) {
+        final r = await AnchorMatcher.registerSweepInIsolate(
+          scanPx: scanCombined,
+          refGeo: refGeo,
+          scanRound: scanRound,
+          refRound: osm.isRoundabout,
+          scanRoad: rr.isEmpty ? null : rr,
+          refRoad: osm.roadPoints,
+          maxRotationDeg: att.$2,
+          centerRotationDeg: att.$1,
+        );
+        if (r != null && (res == null || r.inliers > res.inliers)) {
+          res = r;
+          bestK = k;
+        }
       }
     }
     // דורשים יחס-inliers סביר — מגן מפני התאמה-חלקית מקרית.

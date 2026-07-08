@@ -9,6 +9,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../services/ai_engine.dart';
 import '../services/gdal_warp_service.dart';
 import '../services/gemini_anchor_service.dart';
 import '../services/reference_map_controller.dart';
@@ -284,7 +285,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     // וצריך נפילה-חזרה ל-AI — משתמשים במנוע-המקומי (לפי בחירת ⚙), לא ב-Gemini.
     final opts = await _promptAreaHint();
     if (opts == null || !mounted) return;
-    const key = ''; // בלי מפתח Gemini בתהליך הזה
+    const key = ''; // בלי מפתח Gemini בהתאמה עצמה (רק קריאת-המצפן משתמשת במודל)
     if (!mounted) return;
 
     setState(() => _aiBusy = true);
@@ -296,6 +297,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         apiKey: key,
         areaHint: opts.hint.isEmpty ? null : opts.hint,
         northUp: opts.northUp,
+        exactNorth: opts.exactNorth,
+        compassDeg: opts.compassDeg,
         onStatus: (status) {
           if (!mounted) return;
           ScaffoldMessenger.of(context)
@@ -363,75 +366,26 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     }
   }
 
-  /// דיאלוג שם-האזור (חובה) לפני ההרצה. מפתח Gemini מוגדר בהגדרות ⚙ ואינו
-  /// חלק מהתהליך הזה — המסלול הקלאסי רץ עם הרמז בלבד.
-  Future<({String hint, bool northUp})?> _promptAreaHint() async {
-    final ctrl = TextEditingController(
-      text: await GeminiAnchorService.getAreaHint() ?? '',
-    );
+  /// דיאלוג שם-האזור (חובה) + בחירת-כיוון. תוך כדי הקלדת-השם, המודל
+  /// (מקומי/Gemini לפי ⚙) קורא ברקע את **חץ-הצפון** שבמפה; אם נמצא — הכיוון
+  /// נקבע אוטומטית (עידון ±15° סביבו). אחרת — בחירה-ידנית (מדויק/±20°/מסובבת).
+  Future<({String hint, bool northUp, bool exactNorth, double? compassDeg})?>
+      _promptAreaHint() async {
+    final initial = await GeminiAnchorService.getAreaHint() ?? '';
     if (!mounted) return null;
-    var northUp = true; // רוב מפות-היישוב מיושרות-צפון
-    final result = await showDialog<({String hint, bool northUp})>(
+    // מנוע זמין לקריאת-המצפן? Ollama תמיד; Gemini רק עם מפתח.
+    final engine = await AiEngine.engine();
+    final key = await GeminiAnchorService.getApiKey() ?? '';
+    final compassEngineReady =
+        engine == AiEngine.ollama || key.isNotEmpty;
+    if (!mounted) return null;
+    final result = await showDialog<
+        ({String hint, bool northUp, bool exactNorth, double? compassDeg})>(
       context: context,
-      builder: (ctx) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: StatefulBuilder(
-          builder: (ctx, setDlg) => AlertDialog(
-            title: const Text('שם היישוב/האזור'),
-            // גלילה — במסך-טלפון עם מקלדת פתוחה התוכן חורג (פס צהוב-שחור).
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'הזן את שם היישוב/האזור של המפה — דרוש לאיתור האזור '
-                    'ולהתאמה הקלאסית (בלי AI/ענן).',
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: ctrl,
-                    autofocus: true,
-                    onChanged: (_) => setDlg(() {}), // לרענון מצב-כפתור "הרץ"
-                    decoration: const InputDecoration(
-                      labelText: 'למשל: נוב רמת הגולן',
-                      border: OutlineInputBorder(),
-                    ),
-                    onSubmitted: (v) => v.trim().isEmpty
-                        ? null
-                        : Navigator.pop(ctx, (hint: v.trim(), northUp: northUp)),
-                  ),
-                  CheckboxListTile(
-                    value: northUp,
-                    onChanged: (v) => setDlg(() => northUp = v ?? true),
-                    contentPadding: EdgeInsets.zero,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    title: const Text('המפה מיושרת לצפון (צפון למעלה)'),
-                    subtitle: const Text(
-                      'מומלץ למפות יישוב — התאמה מהירה ומדויקת בהרבה. '
-                      'בטל רק אם המפה מסובבת.',
-                      style: TextStyle(fontSize: 12),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('ביטול'),
-              ),
-              ElevatedButton.icon(
-                onPressed: ctrl.text.trim().isEmpty
-                    ? null // רמז חובה
-                    : () => Navigator.pop(
-                        ctx, (hint: ctrl.text.trim(), northUp: northUp)),
-                icon: const Icon(Icons.auto_awesome),
-                label: const Text('הרץ'),
-              ),
-            ],
-          ),
-        ),
+      builder: (ctx) => _OrientationDialog(
+        imagePath: widget.imagePath,
+        initialHint: initial,
+        compassApiKey: compassEngineReady ? key : null,
       ),
     );
     if (result != null && result.hint.isNotEmpty) {
@@ -1372,4 +1326,234 @@ class _CrosshairPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+/// מצבי-כיוון של המפה לבחירה בדיאלוג.
+enum _OrientMode { compass, nearNorth, exactNorth, rotated }
+
+/// דיאלוג "שם + כיוון": שדה-שם חובה, ובמקביל המודל קורא את חץ-הצפון.
+/// כשנמצא חץ — מוצג "✓ נמצא חץ-צפון" והכיוון נבחר אוטומטית (ניתן לעקוף
+/// לבחירה-ידנית). כשאין מנוע/חץ — בחירה-ידנית (מדויק/±20°/מסובבת).
+class _OrientationDialog extends StatefulWidget {
+  const _OrientationDialog({
+    required this.imagePath,
+    required this.initialHint,
+    required this.compassApiKey,
+  });
+
+  final String imagePath;
+  final String initialHint;
+
+  /// null → אין מנוע זמין לקריאת-מצפן (מדלגים ישר לבחירה-ידנית).
+  final String? compassApiKey;
+
+  @override
+  State<_OrientationDialog> createState() => _OrientationDialogState();
+}
+
+class _OrientationDialogState extends State<_OrientationDialog> {
+  late final TextEditingController _ctrl =
+      TextEditingController(text: widget.initialHint);
+  bool _detecting = false;
+  bool _detectDone = false;
+  double? _compassDeg;
+  _OrientMode _mode = _OrientMode.nearNorth;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.compassApiKey != null) {
+      _detecting = true;
+      _detectCompass();
+    } else {
+      _detectDone = true; // בלי מנוע — בחירה-ידנית מיד
+    }
+  }
+
+  Future<void> _detectCompass() async {
+    double? deg;
+    try {
+      deg = await GeminiAnchorService()
+          .detectCompass(
+            imagePath: widget.imagePath,
+            apiKey: widget.compassApiKey!,
+          )
+          .timeout(const Duration(seconds: 25));
+    } catch (_) {
+      deg = null;
+    }
+    if (!mounted) return;
+    setState(() {
+      _detecting = false;
+      _detectDone = true;
+      _compassDeg = deg;
+      // נמצא חץ → בוחר אוטומטית "לפי מצפן"; אחרת ברירת-מחדל כמעט-צפון.
+      _mode = deg != null ? _OrientMode.compass : _OrientMode.nearNorth;
+    });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  ({String hint, bool northUp, bool exactNorth, double? compassDeg}) _result() {
+    switch (_mode) {
+      case _OrientMode.compass:
+        return (
+          hint: _ctrl.text.trim(),
+          northUp: true,
+          exactNorth: false,
+          compassDeg: _compassDeg,
+        );
+      case _OrientMode.exactNorth:
+        return (
+          hint: _ctrl.text.trim(),
+          northUp: true,
+          exactNorth: true,
+          compassDeg: null,
+        );
+      case _OrientMode.nearNorth:
+        return (
+          hint: _ctrl.text.trim(),
+          northUp: true,
+          exactNorth: false,
+          compassDeg: null,
+        );
+      case _OrientMode.rotated:
+        return (
+          hint: _ctrl.text.trim(),
+          northUp: false,
+          exactNorth: false,
+          compassDeg: null,
+        );
+    }
+  }
+
+  Widget _radio(_OrientMode m, String title, String subtitle) {
+    return RadioListTile<_OrientMode>(
+      value: m,
+      groupValue: _mode,
+      onChanged: (v) => setState(() => _mode = v ?? _mode),
+      contentPadding: EdgeInsets.zero,
+      dense: true,
+      title: Text(title),
+      subtitle: Text(subtitle, style: const TextStyle(fontSize: 12)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final canRun = _ctrl.text.trim().isNotEmpty;
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: AlertDialog(
+        title: const Text('שם היישוב וכיוון המפה'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'הזן את שם היישוב/האזור — דרוש לאיתור האזור ולהתאמה '
+                'הקלאסית (בלי AI/ענן).',
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _ctrl,
+                autofocus: true,
+                onChanged: (_) => setState(() {}),
+                decoration: const InputDecoration(
+                  labelText: 'למשל: נוב רמת הגולן',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              // ── אזור-הכיוון ──
+              if (_detecting)
+                Row(
+                  children: const [
+                    SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    SizedBox(width: 10),
+                    Expanded(child: Text('מעבד מפה… (מחפש חץ-צפון)')),
+                  ],
+                )
+              else ...[
+                if (_detectDone && _compassDeg != null)
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.green.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.check_circle,
+                            color: Colors.green, size: 20),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'עיבוד הצליח! נמצא חץ-צפון '
+                            '(סיבוב ≈${_compassDeg!.round()}°). לחץ המשך.',
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else if (_detectDone && widget.compassApiKey != null)
+                  const Text(
+                    'לא נמצא חץ-צפון במפה — בחר את כיוון המפה ידנית:',
+                    style: TextStyle(fontSize: 13, color: Colors.black54),
+                  ),
+                const SizedBox(height: 4),
+                // רדיו-כיוון. כשנמצא מצפן — מוצג גם כאפשרות (ברירת-מחדל)
+                // וניתן לעקוף לידני.
+                if (_compassDeg != null)
+                  _radio(
+                    _OrientMode.compass,
+                    'לפי חץ-הצפון שזוהה (≈${_compassDeg!.round()}°)',
+                    'הכי מדויק — עידון גיאומטרי ±15° סביב הזווית שנקראה.',
+                  ),
+                _radio(
+                  _OrientMode.nearNorth,
+                  'כמעט-צפון (±20°)',
+                  'ברירת-מחדל למפות עם הטיה קטנה (מצפן ~10-15°).',
+                ),
+                _radio(
+                  _OrientMode.exactNorth,
+                  'צפון מדויק (0°)',
+                  'למפה שמיושרת לצפון בול — נעילה מוחלטת.',
+                ),
+                _radio(
+                  _OrientMode.rotated,
+                  'מסובבת (זווית גדולה)',
+                  'למפה שסובבה משמעותית — יישור-אוטומטי לפי הרחובות.',
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('ביטול'),
+          ),
+          ElevatedButton.icon(
+            // מותר להריץ רק עם שם; אם עדיין מזהה — ממתינים (הכפתור פעיל
+            // אחרי שהשם הוזן, אבל עדיף לתת לזיהוי להסתיים).
+            onPressed: canRun && !_detecting
+                ? () => Navigator.pop(context, _result())
+                : null,
+            icon: const Icon(Icons.auto_awesome),
+            label: Text(_detecting ? 'מעבד…' : 'המשך'),
+          ),
+        ],
+      ),
+    );
+  }
 }
