@@ -199,6 +199,7 @@ class GeminiAnchorService {
     bool northUp = false,
     bool exactNorth = false,
     double? compassDeg,
+    bool compassResolved = false,
     void Function(String status)? onStatus,
   }) async {
     final bytes = await File(imagePath).readAsBytes();
@@ -312,6 +313,7 @@ class GeminiAnchorService {
             areaHint: effectiveHint,
             exactNorth: exactNorth,
             compassDeg: compassDeg,
+            compassResolved: compassResolved,
           );
         } else {
           // מפה מסובבת: מיישרים אותה (deskew) → מזהים על גרסה צירית
@@ -574,18 +576,18 @@ class GeminiAnchorService {
     }
   }
 
-  /// קורא את זווית **חץ-הצפון / שושנת-הרוחות** מהמפה — משימה סמנטית פשוטה
-  /// (מתאים גם למודל-מקומי, בניגוד להתאמה המרחבית). מחזיר את הכיוון שאליו
-  /// מצביע הצפון, במעלות **בכיוון-השעון ממעלה** (0=מעלה, 90=ימין, 180=מטה,
-  /// 270=שמאל) = זווית-הסיבוב של המפה. null אם אין מצפן / כשל.
-  Future<double?> readCompassAngle({
+  /// **מאתר** את תיבת חץ-הצפון/שושנת-הרוחות (משימת-איתור — חוזק המודל, גם
+  /// המקומי; קריאת-הזווית עצמה נעשית **בפיקסלים** ולא במודל, שחלש בזוויות).
+  /// מחזיר תיבה מנורמלת 0..1 (x0,y0,x1,y1), או null אם לא נמצא.
+  Future<({double x0, double y0, double x1, double y1})?> _locateCompass({
     required List<int> jpeg,
     required String apiKey,
   }) async {
     const prompt = '''
-במפה שלפניך יש (אולי) חץ-צפון או שושנת-רוחות (לרוב עם האות N / צפון).
-אם יש — קבע לאיזה כיוון מצביע הצפון, במעלות עם כיוון-השעון ממעלה:
-0=למעלה, 90=ימינה, 180=למטה, 270=שמאלה. דיוק של ±10° מספיק.
+במפה שלפניך יש (אולי) חץ-צפון או שושנת-רוחות/מצפן — עיגול עם כוכב או חץ
+והאותיות N S E W (לעיתים חץ קטן, לעיתים מחט אדומה). אם יש — החזר תיבה-
+תוחמת **צמודה** סביבו בקואורדינטות מנורמלות 0-1000 (x שמאל→ימין,
+y מעלה→מטה): x0,y0 פינה שמאלית-עליונה, x1,y1 ימנית-תחתונה.
 אם אין מצפן/חץ-צפון במפה — החזר found=false.''';
     final body = {
       'contents': [
@@ -607,23 +609,29 @@ class GeminiAnchorService {
           'type': 'OBJECT',
           'properties': {
             'found': {'type': 'BOOLEAN'},
-            'northAngleDeg': {'type': 'NUMBER'},
+            'x0': {'type': 'NUMBER'},
+            'y0': {'type': 'NUMBER'},
+            'x1': {'type': 'NUMBER'},
+            'y1': {'type': 'NUMBER'},
           },
-          'required': ['found', 'northAngleDeg'],
+          'required': ['found', 'x0', 'y0', 'x1', 'y1'],
         },
       },
     };
     final text = await _generate(body, apiKey);
     final root = jsonDecode(text) as Map<String, dynamic>;
     if (root['found'] != true) return null;
-    final ang = (root['northAngleDeg'] as num?)?.toDouble();
-    return ang;
+    double f(String k) => ((root[k] as num?)?.toDouble() ?? 0) / 1000;
+    final x0 = f('x0'), y0 = f('y0'), x1 = f('x1'), y1 = f('y1');
+    if (x1 <= x0 || y1 <= y0) return null;
+    return (x0: x0, y0: y0, x1: x1, y1: y1);
   }
 
-  /// נוחות ל-UI: טוען את התמונה, מקטין לצלע-מקסימום 1600px, וקורא את
-  /// זווית-המצפן. מחזיר null אם אין מצפן / כשל. חריגים נתפסים כאן
-  /// (רשת/מפתח) → null, כדי שהזרימה תיפול חלק לבחירה-ידנית.
-  Future<double?> detectCompass({
+  /// נוחות ל-UI: **מודל מאתר** את המצפן → חותכים את התיבה (עם ריפוד) →
+  /// **קורא-קלאסי** את הזווית מהפיקסלים. מחזיר (זווית cwFromUp, resolved)
+  /// — resolved=true כשהצפון חד-משמעי (אדום/חץ), false כשזה ציר בלבד
+  /// (הגיאומטריה תבחר צפון/דרום). null אם אין מצפן / כשל.
+  Future<({double deg, bool resolved})?> detectCompass({
     required String imagePath,
     required String apiKey,
   }) async {
@@ -637,8 +645,23 @@ class GeminiAnchorService {
             ? img.copyResize(decoded, width: 1600)
             : img.copyResize(decoded, height: 1600);
       }
-      final jpeg = img.encodeJpg(sent, quality: 85);
-      return await readCompassAngle(jpeg: jpeg, apiKey: apiKey);
+      final box = await _locateCompass(
+        jpeg: img.encodeJpg(sent, quality: 85),
+        apiKey: apiKey,
+      );
+      if (box == null) return null;
+      // חיתוך התיבה מהמקור (רזולוציה מלאה) עם ריפוד 25% — הקורא צריך
+      // מרווח לקוצים; חיתוך צמוד מדי חותך אותם.
+      final W = decoded.width, H = decoded.height;
+      final bw = (box.x1 - box.x0) * W, bh = (box.y1 - box.y0) * H;
+      final padX = bw * 0.25, padY = bh * 0.25;
+      final cx0 = ((box.x0 * W) - padX).round().clamp(0, W - 2);
+      final cy0 = ((box.y0 * H) - padY).round().clamp(0, H - 2);
+      final cx1 = ((box.x1 * W) + padX).round().clamp(cx0 + 1, W);
+      final cy1 = ((box.y1 * H) + padY).round().clamp(cy0 + 1, H);
+      final crop = img.copyCrop(decoded,
+          x: cx0, y: cy0, width: cx1 - cx0, height: cy1 - cy0);
+      return RoadJunctionDetector.estimateCompassNorth(crop);
     } catch (_) {
       return null;
     }
@@ -1136,6 +1159,7 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     required String areaHint,
     bool exactNorth = false,
     double? compassDeg,
+    bool compassResolved = false,
     Offset Function(Offset)? unmapPixel,
     int? cropW,
     int? cropH,
@@ -1177,15 +1201,21 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     // מצבי-כיוון (מסלול ישיר): מצפן → חלון ±15° סביב הזווית שנקראה (וגם
     // סביב שלילתה — סימן-הקריאה לא ודאי); צפון-מדויק → ±2°; אחרת בערך-צפון
     // ±20°. deskew → ±12° סביב 0 (השארית אחרי היישור).
-    // כל איבר: (מרכז-הזווית, ±חלון). מצפן: מנסים סביב הזווית שנקראה **וגם
-    // שלילתה** (סימן-הקריאה לא ודאי) **וגם כמעט-צפון 0°±20° כרשת-ביטחון** —
-    // כך קריאת-מצפן שגויה (מודל חלש) לא מזיקה: הטוב-לפי-inliers מנצח.
+    // כל איבר: (מרכז-הזווית, ±חלון). מצפן (זווית cwFromUp מהקורא-הקלאסי):
+    // מנסים סביבה **וסביב שלילתה** (המרה cwFromUp→סיבוב-טרנספורם — הסימן
+    // תלוי-מוסכמה, הגיאומטריה בוחרת). כשלא-מוכרע (ציר בלבד) — גם +180°
+    // (קצה-הציר הנגדי). **תמיד** כמעט-צפון 0°±20° כרשת-ביטחון — קריאה
+    // שגויה/מודל-חלש נופלת חזרה בלי נזק (הטוב-לפי-inliers מנצח).
     final attempts = <(double, double)>[
       if (deskewMode)
         (0.0, 12.0)
       else if (compassDeg != null) ...[
         (compassDeg, 15.0),
         (-compassDeg, 15.0),
+        if (!compassResolved) ...[
+          (compassDeg + 180, 15.0),
+          (-compassDeg - 180, 15.0),
+        ],
         (0.0, 20.0),
       ] else if (exactNorth)
         (0.0, 2.0)

@@ -299,6 +299,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         northUp: opts.northUp,
         exactNorth: opts.exactNorth,
         compassDeg: opts.compassDeg,
+        compassResolved: opts.compassResolved,
         onStatus: (status) {
           if (!mounted) return;
           ScaffoldMessenger.of(context)
@@ -369,8 +370,14 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   /// דיאלוג שם-האזור (חובה) + בחירת-כיוון. תוך כדי הקלדת-השם, המודל
   /// (מקומי/Gemini לפי ⚙) קורא ברקע את **חץ-הצפון** שבמפה; אם נמצא — הכיוון
   /// נקבע אוטומטית (עידון ±15° סביבו). אחרת — בחירה-ידנית (מדויק/±20°/מסובבת).
-  Future<({String hint, bool northUp, bool exactNorth, double? compassDeg})?>
-      _promptAreaHint() async {
+  Future<
+      ({
+        String hint,
+        bool northUp,
+        bool exactNorth,
+        double? compassDeg,
+        bool compassResolved
+      })?> _promptAreaHint() async {
     final initial = await GeminiAnchorService.getAreaHint() ?? '';
     if (!mounted) return null;
     // מנוע זמין לקריאת-המצפן? Ollama תמיד; Gemini רק עם מפתח.
@@ -380,7 +387,13 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         engine == AiEngine.ollama || key.isNotEmpty;
     if (!mounted) return null;
     final result = await showDialog<
-        ({String hint, bool northUp, bool exactNorth, double? compassDeg})>(
+        ({
+          String hint,
+          bool northUp,
+          bool exactNorth,
+          double? compassDeg,
+          bool compassResolved
+        })>(
       context: context,
       builder: (ctx) => _OrientationDialog(
         imagePath: widget.imagePath,
@@ -1357,6 +1370,7 @@ class _OrientationDialogState extends State<_OrientationDialog> {
   bool _detecting = false;
   bool _detectDone = false;
   double? _compassDeg;
+  bool _compassResolved = false;
   _OrientMode _mode = _OrientMode.nearNorth;
 
   @override
@@ -1371,24 +1385,25 @@ class _OrientationDialogState extends State<_OrientationDialog> {
   }
 
   Future<void> _detectCompass() async {
-    double? deg;
+    ({double deg, bool resolved})? c;
     try {
-      deg = await GeminiAnchorService()
+      c = await GeminiAnchorService()
           .detectCompass(
             imagePath: widget.imagePath,
             apiKey: widget.compassApiKey!,
           )
-          .timeout(const Duration(seconds: 25));
+          .timeout(const Duration(seconds: 40));
     } catch (_) {
-      deg = null;
+      c = null;
     }
     if (!mounted) return;
     setState(() {
       _detecting = false;
       _detectDone = true;
-      _compassDeg = deg;
-      // נמצא חץ → בוחר אוטומטית "לפי מצפן"; אחרת ברירת-מחדל כמעט-צפון.
-      _mode = deg != null ? _OrientMode.compass : _OrientMode.nearNorth;
+      _compassDeg = c?.deg;
+      _compassResolved = c?.resolved ?? false;
+      // נמצא מצפן → בוחר אוטומטית "לפי מצפן"; אחרת ברירת-מחדל כמעט-צפון.
+      _mode = c != null ? _OrientMode.compass : _OrientMode.nearNorth;
     });
   }
 
@@ -1398,35 +1413,46 @@ class _OrientationDialogState extends State<_OrientationDialog> {
     super.dispose();
   }
 
-  ({String hint, bool northUp, bool exactNorth, double? compassDeg}) _result() {
+  ({
+    String hint,
+    bool northUp,
+    bool exactNorth,
+    double? compassDeg,
+    bool compassResolved
+  }) _result() {
+    final hint = _ctrl.text.trim();
     switch (_mode) {
       case _OrientMode.compass:
         return (
-          hint: _ctrl.text.trim(),
+          hint: hint,
           northUp: true,
           exactNorth: false,
           compassDeg: _compassDeg,
+          compassResolved: _compassResolved,
         );
       case _OrientMode.exactNorth:
         return (
-          hint: _ctrl.text.trim(),
+          hint: hint,
           northUp: true,
           exactNorth: true,
           compassDeg: null,
+          compassResolved: false,
         );
       case _OrientMode.nearNorth:
         return (
-          hint: _ctrl.text.trim(),
+          hint: hint,
           northUp: true,
           exactNorth: false,
           compassDeg: null,
+          compassResolved: false,
         );
       case _OrientMode.rotated:
         return (
-          hint: _ctrl.text.trim(),
+          hint: hint,
           northUp: false,
           exactNorth: false,
           compassDeg: null,
+          compassResolved: false,
         );
     }
   }

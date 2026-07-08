@@ -1431,6 +1431,135 @@ class RoadJunctionDetector {
     }
     return out;
   }
+
+  /// **קורא-מצפן קלאסי** מתקריב-המצפן (בפיקסלים, בלי מודל). מחזיר את זווית-
+  /// הצפון ב**מעלות כיוון-השעון ממעלה** (0=מעלה, 90=ימין) ו-[resolved] —
+  /// האם הכיוון חד-משמעי (צפון ודאי) או רק **ציר** (צפון/דרום לא-מוכרע,
+  /// הגיאומטריה תבחר). עדיפויות לפי סוג-מצפן:
+  /// 1. **אדום → צפון** (מחט/חץ אדום): הכיוון מהמרכז למרכז-האדום, resolved.
+  /// 2. **חץ אסימטרי**: הקוץ-הארוך מובהק מהמנוגד → ראש-החץ = צפון, resolved.
+  /// 3. **שושנת-רוחות סימטרית**: הקוץ-הארוך = ציר (resolved=false).
+  /// null אם אין מבנה-מצפן ברור בתקריב.
+  static ({double deg, bool resolved})? estimateCompassNorth(img.Image im) {
+    final w = im.width, h = im.height;
+    final dark = List.filled(w * h, false);
+    final red = List.filled(w * h, false);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        final p = im.getPixel(x, y);
+        final r = p.r.toDouble(), g = p.g.toDouble(), b = p.b.toDouble();
+        if (0.299 * r + 0.587 * g + 0.114 * b < 110) dark[y * w + x] = true;
+        if (r > 120 && r > g * 1.6 && r > b * 1.6) red[y * w + x] = true;
+      }
+    }
+    // הרכיב-הכהה הגדול ביותר = גוף-המצפן.
+    final lbl = List.filled(w * h, 0);
+    var cur = 0, bestLbl = 0, bestSz = 0;
+    for (var i = 0; i < w * h; i++) {
+      if (dark[i] && lbl[i] == 0) {
+        cur++;
+        var sz = 0;
+        final st = <int>[i];
+        lbl[i] = cur;
+        while (st.isNotEmpty) {
+          final q = st.removeLast();
+          sz++;
+          final qx = q % w, qy = q ~/ w;
+          for (final d in const [
+            [1, 0], [-1, 0], [0, 1], [0, -1],
+            [1, 1], [1, -1], [-1, 1], [-1, -1],
+          ]) {
+            final nx = qx + d[0], ny = qy + d[1];
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            final ni = ny * w + nx;
+            if (dark[ni] && lbl[ni] == 0) {
+              lbl[ni] = cur;
+              st.add(ni);
+            }
+          }
+        }
+        if (sz > bestSz) {
+          bestSz = sz;
+          bestLbl = cur;
+        }
+      }
+    }
+    if (bestSz < 30) return null;
+    var cx = 0.0, cy = 0.0, n = 0;
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        if (lbl[y * w + x] == bestLbl) {
+          cx += x;
+          cy += y;
+          n++;
+        }
+      }
+    }
+    cx /= n;
+    cy /= n;
+    var rad = 0.0;
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        if (lbl[y * w + x] == bestLbl) {
+          final dx = x - cx, dy = y - cy;
+          final r = sqrt(dx * dx + dy * dy);
+          if (r > rad) rad = r;
+        }
+      }
+    }
+    double toCwUp(double mathDeg) => (mathDeg + 90) % 360;
+    // 1) אדום בתוך רדיוס-המצפן → צפון = כיוון מרכז→מרכז-האדום.
+    var rx = 0.0, ry = 0.0, rn = 0;
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        if (!red[y * w + x]) continue;
+        final dx = x - cx, dy = y - cy;
+        if (sqrt(dx * dx + dy * dy) > rad * 1.3) continue;
+        rx += x;
+        ry += y;
+        rn++;
+      }
+    }
+    if (rn >= 8) {
+      final dx = rx / rn - cx, dy = ry / rn - cy;
+      var m = atan2(dy, dx) * 180 / pi;
+      if (m < 0) m += 360;
+      return (deg: toCwUp(m), resolved: true);
+    }
+    // 2/3) קוץ-ארוך → ציר. reach לכל זווית (בינים של 1°).
+    final reach = List.filled(360, 0.0);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        if (lbl[y * w + x] != bestLbl) continue;
+        final dx = x - cx, dy = y - cy;
+        final r = sqrt(dx * dx + dy * dy);
+        if (r < 3) continue;
+        var ang = atan2(dy, dx) * 180 / pi;
+        if (ang < 0) ang += 360;
+        final bin = ang.round() % 360;
+        if (r > reach[bin]) reach[bin] = r;
+      }
+    }
+    final sm = List.filled(360, 0.0);
+    for (var i = 0; i < 360; i++) {
+      var s = 0.0;
+      for (var k = -4; k <= 4; k++) {
+        s += reach[(i + k + 360) % 360];
+      }
+      sm[i] = s / 9;
+    }
+    var peak = 0;
+    var pv = 0.0;
+    for (var i = 0; i < 360; i++) {
+      if (sm[i] > pv) {
+        pv = sm[i];
+        peak = i;
+      }
+    }
+    // חץ אסימטרי: הקוץ מובהק פי-1.4 מהמנוגד → ראש = צפון (resolved).
+    final resolved = pv > sm[(peak + 180) % 360] * 1.4;
+    return (deg: toCwUp(peak.toDouble()), resolved: resolved);
+  }
 }
 
 class _Cluster {
