@@ -284,8 +284,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     // וצריך נפילה-חזרה ל-AI — משתמשים במנוע-המקומי (לפי בחירת ⚙), לא ב-Gemini.
     final opts = await _promptAreaHint();
     if (opts == null || !mounted) return;
-    const key = ''; // בלי מפתח Gemini בהתאמה עצמה (רק קריאת-המצפן משתמשת במודל)
-    if (!mounted) return;
 
     setState(() => _aiBusy = true);
     try {
@@ -293,7 +291,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         imagePath: widget.imagePath,
         imageWidth: _imageWidth,
         imageHeight: _imageHeight,
-        apiKey: key,
         areaHint: opts.hint.isEmpty ? null : opts.hint,
         northUp: opts.northUp,
         exactNorth: opts.exactNorth,
