@@ -519,9 +519,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                             initialZoom: 15,
                           ),
                           children: [
-                            satellite
-                                ? const SatelliteOnlineSource().buildTileLayer()
-                                : _refMap.buildActiveTileLayer(),
+                            ...(satellite
+                                ? const SatelliteHybridSource().buildTileLayers()
+                                : _refMap.buildActiveTileLayers()),
                             if (provisional != null)
                               OverlayImageLayer(overlayImages: [
                                 _rotatedOverlay(provisional, overlayOpacity),
@@ -1125,10 +1125,11 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                     initialZoom: 13,
                   ),
                   children: [
-                    _refMap.buildActiveTileLayer(),
+                    ..._refMap.buildActiveTileLayers(),
                     OverlayImageLayer(
                       overlayImages: [_rotatedOverlay(_result!, 0.7)],
                     ),
+                    _mapAttribution(),
                   ],
                 ),
               ),
@@ -1318,6 +1319,11 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       _points[idx].world = world;
       _gridTicks.add((pixel: pixel, e: tick!.easting, n: tick.northing, crs: tick.crs));
     });
+    // ממרכזים את מפת-הווידוא על הקואורדינטה שנקראה (כדי לא "לחפש בכל
+    // הארץ"). best-effort — אם המפה עדיין לא בנויה, initialCenter יטפל.
+    try {
+      _mapController.move(world, 16);
+    } catch (_) {}
     ScaffoldMessenger.of(context)
       ..clearSnackBars()
       ..showSnackBar(SnackBar(
@@ -1348,6 +1354,23 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
 
   // ═══ מצב מפה ═══
 
+  /// קרדיט-מקור למפה (חובה משפטית לאריחי OSM/Esri/OpenTopoMap). מוצג
+  /// קבוע בתחתית, כמו ב-navigate.
+  Widget _mapAttribution() {
+    final id = _refMap.active.id;
+    final src = id.startsWith('osm')
+        ? '© OpenStreetMap contributors'
+        : id.startsWith('topo')
+            ? '© OpenTopoMap (CC-BY-SA), © OpenStreetMap'
+            : id.startsWith('satellite')
+                ? 'לוויין © Esri, Maxar, Earthstar Geographics'
+                : '© OpenStreetMap';
+    return SimpleAttributionWidget(
+      source: Text(src, style: const TextStyle(fontSize: 10)),
+      backgroundColor: Colors.white.withValues(alpha: 0.75),
+    );
+  }
+
   Widget _buildMapView() {
     final sources = _refMap.availableSources();
     return Stack(
@@ -1359,7 +1382,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             initialZoom: _lastWorldPoint != null ? 14 : 8,
           ),
           children: [
-            _refMap.buildActiveTileLayer(),
+            ..._refMap.buildActiveTileLayers(),
             // מרקרים ירוקים ממוספרים של נקודות שנדקרו
             MarkerLayer(
               markers: _points
@@ -1392,6 +1415,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                   )
                   .toList(),
             ),
+            _mapAttribution(),
           ],
         ),
         // סרגל מקורות-מפה: בורר (כשיש יותר ממקור אחד) + הוספת תיקייה/ECW

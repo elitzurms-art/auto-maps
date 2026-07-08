@@ -30,12 +30,34 @@ abstract class ReferenceMapSource {
   /// נקרא כשהמקור מפסיק להיות פעיל (שחרור משאבים). idempotent.
   Future<void> deactivate() async {}
 
-  /// `true` כשאפשר לקרוא ל-[buildTileLayer] בבטחה.
+  /// `true` כשאפשר לקרוא ל-[buildTileLayers] בבטחה.
   bool get isReady => true;
 
-  /// שכבת האריחים ל-FlutterMap.
-  Widget buildTileLayer();
+  /// שכבות האריחים ל-FlutterMap (בסדר-ציור). לרוב אריח אחד; להכלאת-לוויין
+  /// זה בסיס-לוויין + שכבות-ייחוס שקופות (כבישים/תוויות) מעליו.
+  List<Widget> buildTileLayers();
 }
+
+/// אריחי-ייחוס שקופים של Esri (כבישים + תוויות) — נועדו להיפרש **מעל**
+/// תצלום-לוויין ("הכלאה"). שקופים, אז לא מסתירים את התמונה.
+List<Widget> _esriReferenceOverlays() => [
+      TileLayer(
+        urlTemplate:
+            'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
+        userAgentPackageName: 'com.elitzur.auto_maps',
+        maxNativeZoom: 18,
+        maxZoom: 20,
+        backgroundColor: Color(0x00000000),
+      ),
+      TileLayer(
+        urlTemplate:
+            'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+        userAgentPackageName: 'com.elitzur.auto_maps',
+        maxNativeZoom: 18,
+        maxZoom: 20,
+        backgroundColor: Color(0x00000000),
+      ),
+    ];
 
 /// מקור OSM online — ברירת המחדל, תמיד זמין.
 class OsmOnlineSource implements ReferenceMapSource {
@@ -57,13 +79,47 @@ class OsmOnlineSource implements ReferenceMapSource {
   bool get isReady => true;
 
   @override
-  Widget buildTileLayer() {
-    return TileLayer(
-      urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-      userAgentPackageName: 'com.elitzur.auto_maps',
-      maxNativeZoom: 19,
-      maxZoom: 20,
-    );
+  List<Widget> buildTileLayers() {
+    return [
+      TileLayer(
+        urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+        userAgentPackageName: 'com.elitzur.auto_maps',
+        maxNativeZoom: 19,
+        maxZoom: 20,
+      ),
+    ];
+  }
+}
+
+/// מקור טופוגרפי online (OpenTopoMap) — קווי-גובה + שבילים, כמו ב-navigate.
+class TopoOnlineSource implements ReferenceMapSource {
+  const TopoOnlineSource();
+
+  @override
+  String get id => 'topo';
+
+  @override
+  String get displayName => 'טופוגרפי (OpenTopoMap)';
+
+  @override
+  Future<void> activate() async {}
+
+  @override
+  Future<void> deactivate() async {}
+
+  @override
+  bool get isReady => true;
+
+  @override
+  List<Widget> buildTileLayers() {
+    return [
+      TileLayer(
+        urlTemplate: 'https://tile.opentopomap.org/{z}/{x}/{y}.png',
+        userAgentPackageName: 'com.elitzur.auto_maps',
+        maxNativeZoom: 17,
+        maxZoom: 19,
+      ),
+    ];
   }
 }
 
@@ -88,16 +144,44 @@ class SatelliteOnlineSource implements ReferenceMapSource {
   @override
   bool get isReady => true;
 
+  /// שכבת-הלוויין הבסיסית (בלי overlays) — לשימוש חוזר ע"י ההכלאה.
+  static final TileLayer baseTile = TileLayer(
+    urlTemplate:
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    userAgentPackageName: 'com.elitzur.auto_maps',
+    maxNativeZoom: 18,
+    maxZoom: 20,
+  );
+
   @override
-  Widget buildTileLayer() {
-    return TileLayer(
-      urlTemplate:
-          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      userAgentPackageName: 'com.elitzur.auto_maps',
-      maxNativeZoom: 18,
-      maxZoom: 20,
-    );
-  }
+  List<Widget> buildTileLayers() => [baseTile];
+}
+
+/// לוויין **מוכלא** — תצלום-אוויר + שכבת-כבישים/תוויות שקופה מעליו (Esri
+/// Reference). מאפשר לאמת יישור מול כבישים ושמות בזמן צפייה בלוויין.
+class SatelliteHybridSource implements ReferenceMapSource {
+  const SatelliteHybridSource();
+
+  @override
+  String get id => 'satellite_hybrid';
+
+  @override
+  String get displayName => 'לוויין + כבישים';
+
+  @override
+  Future<void> activate() async {}
+
+  @override
+  Future<void> deactivate() async {}
+
+  @override
+  bool get isReady => true;
+
+  @override
+  List<Widget> buildTileLayers() => [
+        SatelliteOnlineSource.baseTile,
+        ..._esriReferenceOverlays(),
+      ];
 }
 
 /// מקור ECW מקומי — עוטף [NativeEcwService] (פענוח נייטיבי דרך GDAL/ECW) ומספק
@@ -146,25 +230,27 @@ class EcwReferenceSource implements ReferenceMapSource {
   }
 
   @override
-  Widget buildTileLayer() {
-    return FutureBuilder<bool>(
-      future: _ensureOpened(),
-      builder: (context, snap) {
-        if (snap.connectionState != ConnectionState.done) {
-          return const SizedBox.shrink();
-        }
-        if (snap.data != true) {
-          return const Center(
-            child: Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('טעינת קובץ ה-ECW נכשלה',
-                  textDirection: TextDirection.rtl),
-            ),
-          );
-        }
-        return TileLayer(tileProvider: _service.tileProvider());
-      },
-    );
+  List<Widget> buildTileLayers() {
+    return [
+      FutureBuilder<bool>(
+        future: _ensureOpened(),
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return const SizedBox.shrink();
+          }
+          if (snap.data != true) {
+            return const Center(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Text('טעינת קובץ ה-ECW נכשלה',
+                    textDirection: TextDirection.rtl),
+              ),
+            );
+          }
+          return TileLayer(tileProvider: _service.tileProvider());
+        },
+      ),
+    ];
   }
 
   @override
@@ -206,15 +292,18 @@ class MbtilesReferenceSource implements ReferenceMapSource {
   }
 
   @override
-  Widget buildTileLayer() {
+  List<Widget> buildTileLayers() {
     final m = _mbtiles;
-    if (m == null) return const SizedBox.shrink();
-    return TileLayer(
-      tileProvider: MbTilesTileProvider(mbtiles: m, silenceTileNotFound: true),
-      tileSize: 256,
-      maxNativeZoom: 18,
-      maxZoom: 20,
-    );
+    if (m == null) return const [SizedBox.shrink()];
+    return [
+      TileLayer(
+        tileProvider:
+            MbTilesTileProvider(mbtiles: m, silenceTileNotFound: true),
+        tileSize: 256,
+        maxNativeZoom: 18,
+        maxZoom: 20,
+      ),
+    ];
   }
 }
 
@@ -230,7 +319,9 @@ class ReferenceMapController extends ChangeNotifier {
           sources ??
               const <ReferenceMapSource>[
                 OsmOnlineSource(),
+                SatelliteHybridSource(),
                 SatelliteOnlineSource(),
+                TopoOnlineSource(),
               ],
         ) {
     if (_sources.isEmpty) _sources.add(const OsmOnlineSource());
@@ -253,10 +344,10 @@ class ReferenceMapController extends ChangeNotifier {
   /// שגיאת ההחלפה האחרונה; `null` אם הכל תקין.
   String? get lastError => _lastError;
 
-  /// שכבת האריחים של המקור הפעיל. בזמן החלפה / לפני שהמקור מוכן — לא מצייר כלום.
-  Widget buildActiveTileLayer() {
-    if (_switching || !_active.isReady) return const SizedBox.shrink();
-    return _active.buildTileLayer();
+  /// שכבות האריחים של המקור הפעיל. בזמן החלפה / לפני שהמקור מוכן — ריק.
+  List<Widget> buildActiveTileLayers() {
+    if (_switching || !_active.isReady) return const [SizedBox.shrink()];
+    return _active.buildTileLayers();
   }
 
   /// הוספת מקור בודד לבורר. מדלג אם מזהה זהה כבר קיים. מחזיר `true` אם נוסף.

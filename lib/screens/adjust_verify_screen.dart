@@ -493,9 +493,9 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                 ),
               ),
               children: [
-                _satellite
-                    ? const SatelliteOnlineSource().buildTileLayer()
-                    : widget.refMap.buildActiveTileLayer(),
+                ...(_satellite
+                    ? const SatelliteHybridSource().buildTileLayers()
+                    : widget.refMap.buildActiveTileLayers()),
                 if (prov != null)
                   OverlayImageLayer(overlayImages: [_blendOverlay(prov)]),
                 // קווי-שגיאה: מחברים "היכן הסריקה נוחתת" ל"מיקום ב-OSM".
