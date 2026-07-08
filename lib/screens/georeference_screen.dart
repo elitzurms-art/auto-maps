@@ -1220,10 +1220,15 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
               borderRadius: BorderRadius.circular(8),
               child: InkWell(
                 borderRadius: BorderRadius.circular(8),
-                onTap: () => setState(() {
-                  _gridMode = !_gridMode;
-                  if (_gridMode) _crosshairMode = false;
-                }),
+                onTap: () {
+                  final turningOn = !_gridMode;
+                  setState(() {
+                    _gridMode = turningOn;
+                    if (turningOn) _crosshairMode = false;
+                  });
+                  // הדלקה + אין נקודות → ניסיון זיהוי-רשת אוטומטי.
+                  if (turningOn && _points.isEmpty) _autoDetectGrid();
+                },
                 child: SizedBox(
                   width: 40,
                   height: 40,
@@ -1538,6 +1543,49 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     final e3 = mx * p3.dx + bx, n3 = my * p3.dy + by;
     final w3 = WorldFileParserService().projectToWgs84(e3, n3, t0.crs);
     _points.add(_ControlPoint(pixel: p3)..world = w3);
+  }
+
+  /// **זיהוי-רשת אוטומטי** — מריץ OCR מלא, מזהה ומזווג את תוויות-הקואורדינטה
+  /// לבד, מציב את נקודות-הבקרה, מחשב ומציג תצוגה-מקדימה. נכשל → הודעה
+  /// והמשתמש יכול להקיש ידנית.
+  Future<void> _autoDetectGrid() async {
+    if (_gridBusy) return;
+    setState(() => _gridBusy = true);
+    var ticks = const <({Offset pixel, double e, double n, String crs})>[];
+    try {
+      final scan = await _ensureScanImage();
+      if (scan != null) ticks = await GridCoordService.autoDetectTicks(scan);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() => _gridBusy = false);
+    if (ticks.length < 2) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(
+          content: Text('לא זוהתה רשת אוטומטית — הקש ידנית על 2 צלבי-רשת.'),
+          duration: Duration(seconds: 4),
+        ));
+      return;
+    }
+    setState(() {
+      _points.clear();
+      _gridTicks.clear();
+      for (final t in ticks) {
+        final w = WorldFileParserService().projectToWgs84(t.e, t.n, t.crs);
+        _points.add(_ControlPoint(pixel: t.pixel)..world = w);
+        _gridTicks.add((pixel: t.pixel, e: t.e, n: t.n, crs: t.crs));
+      }
+      _result = null;
+    });
+    if (_gridTicks.length == 2) _synthesizeThirdGridPoint();
+    _calculate();
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text('זוהתה רשת אוטומטית (${ticks.length} נקודות) — '
+            'בדוק בתצוגה-המקדימה ואשר.'),
+        duration: const Duration(seconds: 4),
+      ));
   }
 
   // ═══ מצב מפה ═══

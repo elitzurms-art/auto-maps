@@ -43,6 +43,43 @@ class OcrService {
 
   static Future<bool> available() async => (await tesseractPath()) != null;
 
+  /// מריץ OCR עם פלט **TSV** (תיבות-מילים) — לכל מילה: טקסט + מרכז-פיקסל.
+  /// משמש לאיתור-אוטומטי של תוויות-קואורדינטה. ריק בכשל.
+  static Future<List<({String text, double cx, double cy})>> readWords(
+    String imagePath, {
+    int psm = 11,
+  }) async {
+    final t = await tesseractPath();
+    if (t == null) return const [];
+    final out = '${Directory.systemTemp.path}/_amtsv';
+    try {
+      final r = await Process.run(t, [
+        imagePath,
+        out,
+        '--psm',
+        '$psm',
+        '-c',
+        'tessedit_char_whitelist=0123456789,',
+        'tsv',
+      ]);
+      if (r.exitCode != 0) return const [];
+      final res = <({String text, double cx, double cy})>[];
+      for (final ln in File('$out.tsv').readAsLinesSync().skip(1)) {
+        final c = ln.split('\t');
+        if (c.length < 12) continue;
+        final text = c[11].trim();
+        if (text.isEmpty) continue;
+        final x = double.tryParse(c[6]), y = double.tryParse(c[7]);
+        final w = double.tryParse(c[8]), h = double.tryParse(c[9]);
+        if (x == null || y == null || w == null || h == null) continue;
+        res.add((text: text, cx: x + w / 2, cy: y + h / 2));
+      }
+      return res;
+    } catch (_) {
+      return const [];
+    }
+  }
+
   /// מריץ OCR על קובץ-תמונה עם whitelist-ספרות (+פסיק). מחזיר את הפלט
   /// הגולמי, או מחרוזת ריקה בכשל. [psm] — מצב-פילוח (7=שורה, 11=דליל).
   static Future<String> readDigits(String imagePath, {int psm = 11}) async {

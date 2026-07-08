@@ -86,4 +86,93 @@ class GridCoordService {
     return WorldFileParserService()
         .projectToWgs84(t.easting, t.northing, t.crs);
   }
+
+  /// **איתור-רשת אוטומטי** — בלי קליקים. מגדיל את התמונה ×3, מריץ OCR מלא
+  /// (רגיל→צפונים, מסובב 90°→מזרחים), מסנן מספרי-קואורדינטה **עגולים**
+  /// (כפולת-100, בטווח) שמבודדים את התוויות-האמיתיות מרעש-מספרי-מגרש, מזהה
+  /// CRS מהצפונים, ומזווג כל צפון למזרח הקרוב-ביותר → נקודות-בקרה. מחזיר
+  /// רשימת (pixel, easting, northing, crs), או ריק אם לא נמצאו ≥2.
+  static Future<List<({Offset pixel, double e, double n, String crs})>>
+      autoDetectTicks(img.Image src) async {
+    const scale = 3;
+    final up = img.copyResize(src,
+        width: src.width * scale, interpolation: img.Interpolation.cubic);
+    final uw = up.width;
+    final dir = Directory.systemTemp;
+    final nPath = '${dir.path}/_amauto_n.png';
+    final rPath = '${dir.path}/_amauto_r.png';
+    File(nPath).writeAsBytesSync(img.encodePng(up));
+    File(rPath).writeAsBytesSync(img.encodePng(img.copyRotate(up, angle: -90)));
+
+    int? roundVal(String t) {
+      final d = t.replaceAll(',', '').trim();
+      if (!RegExp(r'^\d{6,7}$').hasMatch(d)) return null;
+      final v = int.parse(d);
+      return v % 100 == 0 ? v : null; // תוויות-רשת הן מספרים עגולים
+    }
+
+    bool isNorthing(int v) =>
+        (v >= 400000 && v <= 1300000) || (v >= 3000000 && v <= 4000000);
+
+    // צפונים מהמעבר-הרגיל (מיקום-מקורי = מרכז/scale).
+    final norths = <({double v, Offset px})>[];
+    for (final w in await OcrService.readWords(nPath)) {
+      final v = roundVal(w.text);
+      if (v != null && isNorthing(v)) {
+        norths.add((v: v.toDouble(), px: Offset(w.cx / scale, w.cy / scale)));
+      }
+    }
+    if (norths.isEmpty) return const [];
+    // CRS מהצפונים → טווח-המזרח המתאים (בלי חפיפה בין ITM ל-UTM).
+    final utm = norths.any((n) => n.v >= 3000000);
+    bool isEasting(int v) =>
+        utm ? (v >= 600000 && v <= 834000) : (v >= 100000 && v <= 300000);
+
+    final easts = <({double v, Offset px})>[];
+    // מזרחים אופקיים (נדיר) מהמעבר-הרגיל.
+    for (final w in await OcrService.readWords(nPath)) {
+      final v = roundVal(w.text);
+      if (v != null && isEasting(v)) {
+        easts.add((v: v.toDouble(), px: Offset(w.cx / scale, w.cy / scale)));
+      }
+    }
+    // מזרחים אנכיים מהמעבר-המסובב (-90° CCW): dst(dx,dy)→src(uw-1-dy, dx).
+    for (final w in await OcrService.readWords(rPath)) {
+      final v = roundVal(w.text);
+      if (v != null && isEasting(v)) {
+        easts.add((
+          v: v.toDouble(),
+          px: Offset((uw - 1 - w.cy) / scale, w.cx / scale),
+        ));
+      }
+    }
+    if (easts.isEmpty) return const [];
+
+    // זיווג: לכל צפון, המזרח הקרוב-ביותר (אותה פינת-רשת). הפיקסל = אמצע
+    // בין שתי התוויות (≈ פינת-הצלב, שגיאה זניחה).
+    final crs = WorldFileParserService().detectCrs(
+      easts.first.v,
+      norths.first.v,
+    );
+    final ticks = <({Offset pixel, double e, double n, String crs})>[];
+    for (final nrt in norths) {
+      ({double v, Offset px})? best;
+      var bd = double.infinity;
+      for (final e in easts) {
+        final d = (nrt.px - e.px).distanceSquared;
+        if (d < bd) {
+          bd = d;
+          best = e;
+        }
+      }
+      if (best == null) continue;
+      ticks.add((
+        pixel: Offset((nrt.px.dx + best.px.dx) / 2, (nrt.px.dy + best.px.dy) / 2),
+        e: best.v,
+        n: nrt.v,
+        crs: crs,
+      ));
+    }
+    return ticks;
+  }
 }
