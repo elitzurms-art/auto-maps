@@ -38,9 +38,9 @@ abstract class ReferenceMapSource {
   List<Widget> buildTileLayers();
 }
 
-/// אריחי-ייחוס שקופים של Esri (כבישים + תוויות) — נועדו להיפרש **מעל**
-/// תצלום-לוויין ("הכלאה"). שקופים, אז לא מסתירים את התמונה.
-List<Widget> _esriReferenceOverlays() => [
+/// אריחי-ייחוס שקופים של Esri (כבישים + תוויות) — נפרשים **מעל** מפת-הבסיס
+/// (בעיקר לוויין) כשה-toggle "כבישים" דלוק. שקופים, אז לא מסתירים.
+List<Widget> esriRoadOverlays() => [
       TileLayer(
         urlTemplate:
             'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
@@ -157,32 +157,6 @@ class SatelliteOnlineSource implements ReferenceMapSource {
   List<Widget> buildTileLayers() => [baseTile];
 }
 
-/// לוויין **מוכלא** — תצלום-אוויר + שכבת-כבישים/תוויות שקופה מעליו (Esri
-/// Reference). מאפשר לאמת יישור מול כבישים ושמות בזמן צפייה בלוויין.
-class SatelliteHybridSource implements ReferenceMapSource {
-  const SatelliteHybridSource();
-
-  @override
-  String get id => 'satellite_hybrid';
-
-  @override
-  String get displayName => 'לוויין + כבישים';
-
-  @override
-  Future<void> activate() async {}
-
-  @override
-  Future<void> deactivate() async {}
-
-  @override
-  bool get isReady => true;
-
-  @override
-  List<Widget> buildTileLayers() => [
-        SatelliteOnlineSource.baseTile,
-        ..._esriReferenceOverlays(),
-      ];
-}
 
 /// מקור ECW מקומי — עוטף [NativeEcwService] (פענוח נייטיבי דרך GDAL/ECW) ומספק
 /// שכבת אריחים ל-flutter_map. האריחים מרונדרים ב-warp על-דרישה ל-EPSG:3857, אז
@@ -319,7 +293,6 @@ class ReferenceMapController extends ChangeNotifier {
           sources ??
               const <ReferenceMapSource>[
                 OsmOnlineSource(),
-                SatelliteHybridSource(),
                 SatelliteOnlineSource(),
                 TopoOnlineSource(),
               ],

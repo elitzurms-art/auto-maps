@@ -494,7 +494,7 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
               ),
               children: [
                 ...(_satellite
-                    ? const SatelliteHybridSource().buildTileLayers()
+                    ? [SatelliteOnlineSource.baseTile]
                     : widget.refMap.buildActiveTileLayers()),
                 if (prov != null)
                   OverlayImageLayer(overlayImages: [_blendOverlay(prov)]),

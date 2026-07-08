@@ -108,6 +108,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   LatLng? _cursorCenter;
   // סוג רשת-הקואורדינטות המצוירת: null=כבוי, 'itm', 'utm'.
   String? _gridType;
+  // שכבת-על "כבישים ותוויות" (Esri Reference) מעל מפת-הבסיס.
+  bool _roadsOverlay = false;
   // מנוי לאירועי-המפה (הזזה) — מבוטל ב-dispose.
   StreamSubscription? _mapEventSub;
 
@@ -647,7 +649,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                           ),
                           children: [
                             ...(satellite
-                                ? const SatelliteHybridSource().buildTileLayers()
+                                ? [SatelliteOnlineSource.baseTile]
                                 : _refMap.buildActiveTileLayers()),
                             if (provisional != null)
                               OverlayImageLayer(overlayImages: [
@@ -1522,6 +1524,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           ),
           children: [
             ..._refMap.buildActiveTileLayers(),
+            // שכבת-על כבישים/תוויות (toggle) — מעל מפת-הבסיס
+            if (_roadsOverlay) ...esriRoadOverlays(),
             // רשת-קואורדינטות (ITM/UTM) — נצבעת מתחת למרקרים
             if (_gridType != null)
               PolylineLayer(polylines: _buildGridLines()),
@@ -1678,6 +1682,30 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                   ],
                 ),
               ),
+              const SizedBox(height: 6),
+              // toggle כבישים/תוויות מעל מפת-הבסיס (בעיקר לוויין)
+              Material(
+                elevation: 2,
+                borderRadius: BorderRadius.circular(8),
+                color: _roadsOverlay ? Colors.teal[50] : Colors.white,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => setState(() => _roadsOverlay = !_roadsOverlay),
+                  child: Tooltip(
+                    message: 'כבישים ותוויות (מעל הלוויין)',
+                    child: SizedBox(
+                      width: 40,
+                      height: 40,
+                      child: Icon(
+                        Icons.add_road,
+                        size: 20,
+                        color:
+                            _roadsOverlay ? Colors.teal[800] : Colors.grey[700],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -1706,7 +1734,11 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                     vertical: 5,
                   ),
                   child: Text(
-                    _coordReadout(_cursorCenter ?? _mapController.camera.center),
+                    // ⚠️ בלי _mapController.camera כאן — הוא לא מאותחל עד
+                    // שה-FlutterMap נבנה (LateInitializationError בבנייה).
+                    _coordReadout(_cursorCenter ??
+                        _lastWorldPoint ??
+                        const LatLng(31.5, 34.8)),
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 12,
