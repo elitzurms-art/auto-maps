@@ -1149,7 +1149,14 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
         (0.0, 20.0),
     ];
 
+    // ציון-השוואה **בין ניסיונות**: inliers ראשית, **חפיפת-כבישים כשובר-
+    // שוויון** — קריטי למצפן-ציר (צפון מול דרום): 180° סימטריית-רשת נותן
+    // מספר-inliers כמעט-זהה, וחפיפת-הכבישים (מפה הפוכה → כבישים לא חופפים)
+    // בוחרת את הכיוון הנכון. (בלי זה הפתרון-ההפוך היה מנצח לפי inliers.)
+    double scoreOf(MatchResult r) =>
+        r.inliers * 10 - (r.roadFitMeters.isNaN ? 0.0 : r.roadFitMeters);
     MatchResult? res;
+    var bestScore = -double.infinity;
     var bestK = 0;
     for (var k = 0; k < quarters; k++) {
       final scanCombined =
@@ -1168,7 +1175,8 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
           maxRotationDeg: att.$2,
           centerRotationDeg: att.$1,
         );
-        if (r != null && (res == null || r.inliers > res.inliers)) {
+        if (r != null && scoreOf(r) > bestScore) {
+          bestScore = scoreOf(r);
           res = r;
           bestK = k;
         }

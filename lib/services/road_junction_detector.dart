@@ -1593,7 +1593,14 @@ class RoadJunctionDetector {
       }
     }
     final resolved = pv > sm[(peak + 180) % 360] * 1.4;
-    return (deg: toCwUp(peak.toDouble()), resolved: resolved);
+    var deg = toCwUp(peak.toDouble());
+    // ציר לא-מוכרע: מקפלים ל-(-90°,90°] — הקצה הקרוב-לצפון, כדי שהתצוגה
+    // תהיה אינטואיטיבית (10° ולא 190°). ההתאמה ממילא מנסה את שני הקצוות.
+    if (!resolved) {
+      deg = deg % 180;
+      if (deg > 90) deg -= 180;
+    }
+    return (deg: deg, resolved: resolved);
   }
 
   /// [detectCompassInImage] ב-Isolate (סריקת-רכיבים כבדה).

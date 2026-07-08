@@ -17,12 +17,19 @@ class MatchResult {
   final double scaleMetersPerPx;
   final double rotationDeg;
   final int inliers;
+
+  /// חפיפת-כבישים (מטרים, נמוך=טוב) של הפתרון — NaN כשלא חושבה. משמש
+  /// להשוואה **בין ניסיונות-זווית** (למשל צפון מול דרום במצפן-ציר): מספר-
+  /// inliers דומה ב-180° סימטריית-רשת, וחפיפת-הכבישים היא שוברת-השוויון.
+  final double roadFitMeters;
+
   const MatchResult(
     this.matches,
     this.scaleMetersPerPx,
     this.rotationDeg,
-    this.inliers,
-  );
+    this.inliers, [
+    this.roadFitMeters = double.nan,
+  ]);
 }
 
 /// השערת-רישום אחת (אשכול-זווית מתוך מועמדי-ה-RANSAC): הטרנספורמציה
@@ -278,6 +285,7 @@ class AnchorMatcher {
   /// בונה [MatchResult] (התאמות 1-1 + snap ל-OSM) מטרנספורמציה נתונה —
   /// למשל השערה שנבחרה ע"י שובר-שוויון.
   static MatchResult? buildResult({
+    double roadFitMeters = double.nan,
     required List<Point<double>> scanPx,
     required List<LatLng> refGeo,
     List<bool>? scanRound,
@@ -327,7 +335,7 @@ class AnchorMatcher {
     if (matches.length < minInliers) return null;
 
     final rotDeg = atan2(a.im, a.re) * 180 / pi;
-    return MatchResult(matches, a.abs, rotDeg, matches.length);
+    return MatchResult(matches, a.abs, rotDeg, matches.length, roadFitMeters);
   }
 
   /// מחזיר את אשכולות-ההשערות המובילים (עד [maxHypotheses], מובחנים
@@ -1051,6 +1059,7 @@ class AnchorMatcher {
       aIm: best!.a.im,
       bRe: best!.b.re,
       bIm: best!.b.im,
+      roadFitMeters: best!.roadFit,
       minInliers: minInliers,
     );
   }
