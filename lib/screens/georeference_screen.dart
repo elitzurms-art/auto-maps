@@ -12,6 +12,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../services/elevation_service.dart';
 import '../services/gdal_warp_service.dart';
 import '../services/gemini_anchor_service.dart';
 import '../services/grid_coord_service.dart';
@@ -110,6 +111,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   String? _gridType;
   // שכבת-על "כבישים ותוויות" (Esri Reference) מעל מפת-הבסיס.
   bool _roadsOverlay = false;
+  // גובה (מטרים) במרכז-המפה — נשלף מ-API בהשהיה; null עד שנטען.
+  double? _cursorElevation;
+  Timer? _elevDebounce;
   // מנוי לאירועי-המפה (הזזה) — מבוטל ב-dispose.
   StreamSubscription? _mapEventSub;
 
@@ -139,12 +143,20 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     // מעקב אחר הזזת-המפה — מעדכן את קריאת-הקואורדינטה ואת רשת-הקואורדינטות.
     _mapEventSub = _mapController.mapEventStream.listen((_) {
       if (!mounted) return;
-      setState(() => _cursorCenter = _mapController.camera.center);
+      final c = _mapController.camera.center;
+      setState(() => _cursorCenter = c);
+      // גובה: שליפה מושהית (600ms) שלא להציף את ה-API בזמן גרירה.
+      _elevDebounce?.cancel();
+      _elevDebounce = Timer(const Duration(milliseconds: 600), () async {
+        final e = await ElevationService.elevationAt(c);
+        if (mounted) setState(() => _cursorElevation = e);
+      });
     });
   }
 
   @override
   void dispose() {
+    _elevDebounce?.cancel();
     _refMap.removeListener(_onRefMapChanged);
     _mapEventSub?.cancel();
     _transformController.dispose();
@@ -1736,9 +1748,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                   child: Text(
                     // ⚠️ בלי _mapController.camera כאן — הוא לא מאותחל עד
                     // שה-FlutterMap נבנה (LateInitializationError בבנייה).
-                    _coordReadout(_cursorCenter ??
-                        _lastWorldPoint ??
-                        const LatLng(31.5, 34.8)),
+                    '${_coordReadout(_cursorCenter ?? _lastWorldPoint ?? const LatLng(31.5, 34.8))}'
+                    '${_cursorElevation != null ? '  ·  גובה ${_cursorElevation!.round()}מ\'' : ''}',
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 12,
