@@ -1,16 +1,20 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:image/image.dart' as img;
 import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../services/gdal_warp_service.dart';
 import '../services/gemini_anchor_service.dart';
+import '../services/grid_coord_service.dart';
+import '../services/ocr_service.dart';
 import '../services/reference_map_controller.dart';
 import '../services/world_file_parser_service.dart';
 import 'adjust_verify_screen.dart';
@@ -71,6 +75,15 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   final GlobalKey _imageViewKey = GlobalKey();
   bool _crosshairMode = false; // false = לחיצה ישירה, true = צלב + כפתור
 
+  // מצב **רשת-קואורדינטות**: הקשה על צלב-רשת → OCR קורא את הקואורדינטה
+  // המודפסת (ITM/UTM) וממלא את ה-world אוטומטית. דורש Tesseract (Windows).
+  bool _gridMode = false;
+  bool _ocrAvailable = false;
+  bool _gridBusy = false;
+  img.Image? _scanImage; // התמונה המפוענחת (לחיתוך חלונות-OCR)
+  // צלבי-רשת שנקראו: פיקסל + קואורדינטה מוקרנת (מטרים) + CRS.
+  final List<({Offset pixel, double e, double n, String crs})> _gridTicks = [];
+
   /// סקאלה מ-pixels אמיתיים ל-display
   double get _displayScale {
     if (_imageWidth == 0 || _imageHeight == 0) return 1.0;
@@ -103,6 +116,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     _refMap.addListener(_onRefMapChanged);
     // גילוי אוטומטי של קבצי-מפה בתיקיית-הייחוס המשתמעת (reference_maps).
     _refMap.loadDefaultFolder();
+    // זמינות-OCR (Tesseract) — קובעת אם להציע את מצב רשת-הקואורדינטות.
+    OcrService.available().then((ok) {
+      if (mounted) setState(() => _ocrAvailable = ok);
+    });
   }
 
   @override
@@ -1004,6 +1021,79 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             ),
           ),
         ),
+        // כפתור מצב רשת-קואורדינטות (OCR) — רק כשיש Tesseract.
+        if (_ocrAvailable)
+          Positioned(
+            top: 8,
+            left: 56,
+            child: Material(
+              color: _gridMode ? Colors.teal[50] : Colors.white,
+              elevation: 2,
+              borderRadius: BorderRadius.circular(8),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: () => setState(() {
+                  _gridMode = !_gridMode;
+                  if (_gridMode) _crosshairMode = false;
+                }),
+                child: SizedBox(
+                  width: 40,
+                  height: 40,
+                  child: Icon(
+                    Icons.grid_on,
+                    color: _gridMode ? Colors.teal : Colors.grey[700],
+                    size: 22,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        // רמז למצב-הרשת
+        if (_gridMode)
+          Positioned(
+            top: 8,
+            left: 104,
+            right: 8,
+            child: IgnorePointer(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.teal.withValues(alpha: 0.9),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Text(
+                  'מצב רשת: הקש על צלב-רשת (פינה עם מספרי-קואורדינטה) — '
+                  'הקואורדינטה תיקרא אוטומטית',
+                  style: TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ),
+            ),
+          ),
+        // אינדיקטור-עומס בזמן קריאת-OCR
+        if (_gridBusy)
+          const Positioned.fill(
+            child: IgnorePointer(
+              child: Center(
+                child: Card(
+                  child: Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        SizedBox(width: 12),
+                        Text('קורא קואורדינטה…'),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
         // תצוגה מקדימה
         if (_result != null) _buildPreviewOverlay(),
       ],
@@ -1171,7 +1261,89 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     final px = (displayPoint.dx / scale).clamp(0.0, _imageWidth.toDouble());
     final py = (displayPoint.dy / scale).clamp(0.0, _imageHeight.toDouble());
 
-    _pickOnImage(Offset(px, py));
+    if (_gridMode) {
+      _gridTapAt(Offset(px, py));
+    } else {
+      _pickOnImage(Offset(px, py));
+    }
+  }
+
+  /// מפענח את תמונת-הסריקה פעם אחת (ב-Isolate) לחיתוך חלונות-OCR.
+  Future<img.Image?> _ensureScanImage() async {
+    if (_scanImage != null) return _scanImage;
+    final path = widget.imagePath;
+    _scanImage = await Isolate.run(() {
+      final bytes = File(path).readAsBytesSync();
+      return img.decodeImage(bytes);
+    });
+    return _scanImage;
+  }
+
+  /// מצב רשת-קואורדינטות: הקשה על צלב → OCR קורא את הקואורדינטה המודפסת
+  /// (ITM/UTM, זיהוי-CRS אוטומטי) וממלא את ה-world של הנקודה. נכשל → הודעה
+  /// והנקודה מוסרת (שלא תישאר נקודה בלי-world).
+  Future<void> _gridTapAt(Offset pixel) async {
+    if (_gridBusy) return;
+    final idx = _points.length;
+    setState(() {
+      _points.add(_ControlPoint(pixel: pixel));
+      _isOnMap = false;
+      _result = null;
+      _gridBusy = true;
+    });
+    ({double easting, double northing, String crs})? tick;
+    try {
+      final scan = await _ensureScanImage();
+      if (scan != null) tick = await GridCoordService.readTick(scan, pixel);
+    } catch (_) {}
+    if (!mounted) return;
+    if (tick == null) {
+      setState(() {
+        _gridBusy = false;
+        if (idx < _points.length) _points.removeAt(idx);
+      });
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(
+          content: Text('לא זוהתה קואורדינטה בנקודה — כוון על צלב-הרשת '
+              '(הפינה עם המספרים) והקש שוב.'),
+          duration: Duration(seconds: 4),
+        ));
+      return;
+    }
+    final world = WorldFileParserService()
+        .projectToWgs84(tick.easting, tick.northing, tick.crs);
+    setState(() {
+      _gridBusy = false;
+      _points[idx].world = world;
+      _gridTicks.add((pixel: pixel, e: tick!.easting, n: tick.northing, crs: tick.crs));
+    });
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text('נקראה קואורדינטה (${tick.crs}): '
+            'E=${tick.easting.round()} N=${tick.northing.round()}'),
+        duration: const Duration(seconds: 2),
+      ));
+    // רשת צירית (מיושרת-צפון): 2 צלבים מספיקים. גוזרים affine-צירי
+    // ומסנתזים נקודת-בקרה שלישית עקבית כדי ש-_calculate (הדורש 3) יעבוד.
+    if (_gridTicks.length == 2) _synthesizeThirdGridPoint();
+    _calculate();
+  }
+
+  /// מ-2 צלבי-רשת גוזר affine-צירי (E=mx·px+bx, N=my·py+by) ומוסיף נקודת-
+  /// בקרה שלישית עקבית (בפינה הנגדית של המלבן) — כך הרישום מדויק-לחלוטין
+  /// גם עם 2 קריאות בלבד.
+  void _synthesizeThirdGridPoint() {
+    final t0 = _gridTicks[0], t1 = _gridTicks[1];
+    final dpx = t1.pixel.dx - t0.pixel.dx, dpy = t1.pixel.dy - t0.pixel.dy;
+    if (dpx.abs() < 5 || dpy.abs() < 5) return; // כמעט על אותו ציר — לא ניתן
+    final mx = (t1.e - t0.e) / dpx, bx = t0.e - (t1.e - t0.e) / dpx * t0.pixel.dx;
+    final my = (t1.n - t0.n) / dpy, by = t0.n - (t1.n - t0.n) / dpy * t0.pixel.dy;
+    final p3 = Offset(t1.pixel.dx, t0.pixel.dy); // פינה נגדית
+    final e3 = mx * p3.dx + bx, n3 = my * p3.dy + by;
+    final w3 = WorldFileParserService().projectToWgs84(e3, n3, t0.crs);
+    _points.add(_ControlPoint(pixel: p3)..world = w3);
   }
 
   // ═══ מצב מפה ═══
