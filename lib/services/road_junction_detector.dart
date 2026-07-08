@@ -385,6 +385,131 @@ class RoadJunctionDetector {
     );
   }
 
+  /// מוצא **אזורים צבועים גדולים** — צמחייה (ירוק) ומים (כחול) — במפה
+  /// משורטטת, ומחזיר את מרכזי-הכובד שלהם בפיקסלי-**מקור**, מתויגים
+  /// 'green'/'water'. אלה הופכים לעוגני-גיאו (מותאמים למרכזי-כובד של
+  /// landuse/water מ-OSM במקום אחר). בניגוד לגלאי-הצמתים — כאן הצבע הוא
+  /// האות, לא הטופולוגיה.
+  ///
+  /// הצנרת: הקטנה לעבודה → סיווג פר-פיקסל לפי RGB (ירוק = g שולט בבירור,
+  /// כחול = b שולט בבירור) עם מסכת-תוכן להחרגת רקע-חוץ → תיוג-רכיבים
+  /// (איטרטיבי, 8-שכנות) בנפרד לירוק ולמים → שמירת רכיבים ששטחם ≥0.15%
+  /// משטח-העבודה (מסנן אייקונים/טקסט צבעוני זעיר) → מיפוי-חזרה לפיקסלי-מקור,
+  /// מיון לפי שטח יורד, חיתוך ל-12.
+  static List<({Point<double> center, String kind})> detectColorCentroids(
+    img.Image src,
+  ) {
+    // הקטנה לעבודה — 1500 מספיק לאזורי-צבע גדולים והרבה יותר מהיר.
+    const workDim = 1500;
+    var work = src;
+    var scale = 1.0;
+    final maxSide = max(src.width, src.height);
+    if (maxSide > workDim) {
+      scale = maxSide / workDim;
+      work = src.width >= src.height
+          ? img.copyResize(src, width: workDim)
+          : img.copyResize(src, height: workDim);
+    }
+    final w = work.width, h = work.height;
+    if (w < 60 || h < 60) {
+      return const <({Point<double> center, String kind})>[];
+    }
+
+    // בהירות למסכת-התוכן (מחריגה רקע-חוץ אחיד — פינות-סיבוב/שוליים).
+    final lum = Uint8List(w * h);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        lum[y * w + x] =
+            img.getLuminance(work.getPixel(x, y)).round().clamp(0, 255);
+      }
+    }
+    final content = _contentMask(lum, w, h);
+
+    // סיווג פר-פיקסל: ירוק = g ערוץ-המקסימום ובבירור מעל r ו-b; כחול =
+    // b ערוץ-המקסימום ובבירור מעל r ו-g. שאר הפיקסלים (אפור/לבן/צהוב/כביש)
+    // נופלים בין הכיסאות ולא נספרים.
+    final maskGreen = Uint8List(w * h);
+    final maskWater = Uint8List(w * h);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        final i = y * w + x;
+        if (content[i] == 0) continue; // דילוג על רקע-חוץ
+        final px = work.getPixel(x, y);
+        final r = px.r.toInt(), g = px.g.toInt(), b = px.b.toInt();
+        if (g > r + 18 && g > b + 18 && g > 90) {
+          maskGreen[i] = 1;
+        } else if (b > r + 18 && b > g + 10 && b > 90) {
+          maskWater[i] = 1;
+        }
+      }
+    }
+
+    // שטח-מינימום = 0.15% משטח-העבודה — מוריד אייקונים/טקסט צבעוני זעיר
+    // ומשאיר פארקים/בריכות אמיתיים.
+    final minArea = max(50, (w * h * 0.0015).round());
+    final out = <({Point<double> center, String kind, int area})>[];
+    for (final c in _colorComponents(maskGreen, w, h, minArea)) {
+      out.add((
+        center: Point(c.cx * scale, c.cy * scale),
+        kind: 'green',
+        area: c.weight,
+      ));
+    }
+    for (final c in _colorComponents(maskWater, w, h, minArea)) {
+      out.add((
+        center: Point(c.cx * scale, c.cy * scale),
+        kind: 'water',
+        area: c.weight,
+      ));
+    }
+
+    // הגדול קודם, מוגבל ל-12.
+    out.sort((a, b) => b.area.compareTo(a.area));
+    return [
+      for (final c in out.take(12)) (center: c.center, kind: c.kind),
+    ];
+  }
+
+  /// תיוג-רכיבים מחוברים על מסכה בינארית (8-שכנות, מחסנית איטרטיבית —
+  /// בלי רקורסיה, התמונות גדולות). מחזיר מרכז-כובד + שטח לכל רכיב ששטחו
+  /// ≥ [minArea]; רכיבים קטנים יותר נזרקים.
+  static List<_Cluster> _colorComponents(
+    Uint8List m,
+    int w,
+    int h,
+    int minArea,
+  ) {
+    final out = <_Cluster>[];
+    final visited = Uint8List(w * h);
+    final stack = <int>[];
+    for (var start = 0; start < m.length; start++) {
+      if (m[start] == 0 || visited[start] == 1) continue;
+      var size = 0, sx = 0, sy = 0;
+      stack.add(start);
+      visited[start] = 1;
+      while (stack.isNotEmpty) {
+        final p = stack.removeLast();
+        final x = p % w, y = p ~/ w;
+        size++;
+        sx += x;
+        sy += y;
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            final nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            final q = ny * w + nx;
+            if (m[q] == 1 && visited[q] == 0) {
+              visited[q] = 1;
+              stack.add(q);
+            }
+          }
+        }
+      }
+      if (size >= minArea) out.add(_Cluster(sx / size, sy / size, size));
+    }
+    return out;
+  }
+
   /// שמירת מסכה בינארית כ-PNG לדיבוג (לבן = 1).
   static void _dbgSave(
     String? dir,

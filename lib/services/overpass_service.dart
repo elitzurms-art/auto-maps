@@ -242,6 +242,132 @@ class OverpassService {
     return LatLng(sumLat / sumW, sumLon / sumW);
   }
 
+  /// צנטרואידים של שטחי-ירק ומים ב-[bbox] — **נקודה לכל פוליגון**, מסווגת
+  /// ל-`green`/`water`. משמש כ"מצפן" רב-נקודתי לרישום (כתמי-ירק/מים בסריקה
+  /// ↔ הפוליגונים האמיתיים). שאילתה אחת; סיווג לפי התגים; מסנן פוליגוני-רעש
+  /// זעירים; ממוין לפי שטח יורד (הגדולים תחילה).
+  static Future<List<({LatLng center, String kind})>> fetchLanduseCentroids(
+    GeoBbox bbox,
+  ) async {
+    final bb = '(${bbox.south},${bbox.west},${bbox.north},${bbox.east})';
+    final query =
+        '[out:json][timeout:60];('
+        'way["landuse"~"^(grass|meadow|recreation_ground|farmland|orchard|'
+        'vineyard|forest|village_green|cemetery|reservoir)\$"]$bb;'
+        'way["leisure"~"^(park|pitch|garden|playground|sports_centre|'
+        'golf_course|stadium|swimming_pool)\$"]$bb;'
+        'way["natural"~"^(wood|water)\$"]$bb;'
+        ');out geom;';
+    final body = await _post(query);
+    final elements =
+        (jsonDecode(body)['elements'] as List).cast<Map<String, dynamic>>();
+    // סף-שטח מינימלי (בערך deg²) לסינון פוליגוני-רעש זעירים.
+    const minArea = 1e-8;
+    final regions = <({LatLng center, String kind, double area})>[];
+    for (final w in elements) {
+      final geom = (w['geometry'] as List?)?.cast<Map<String, dynamic>>();
+      if (geom == null || geom.length < 3) continue;
+      // צנטרואיד משוקלל-שטח פר-פוליגון (נוסחת-שרוך, כמו fetchGreenCentroid).
+      var area = 0.0, cLat = 0.0, cLon = 0.0;
+      for (var i = 0; i < geom.length; i++) {
+        final a = geom[i], b = geom[(i + 1) % geom.length];
+        final cross = (a['lon'] as num).toDouble() * (b['lat'] as num) -
+            (b['lon'] as num).toDouble() * (a['lat'] as num);
+        area += cross.toDouble();
+        cLat += (a['lat'] as num).toDouble();
+        cLon += (a['lon'] as num).toDouble();
+      }
+      final wgt = area.abs();
+      if (wgt < minArea) continue;
+      // סיווג לפי התגים: מים (natural=water / landuse=reservoir /
+      // leisure=swimming_pool) — אחרת ירוק.
+      final tags = (w['tags'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final isWater = tags['natural'] == 'water' ||
+          tags['landuse'] == 'reservoir' ||
+          tags['leisure'] == 'swimming_pool';
+      regions.add((
+        center: LatLng(cLat / geom.length, cLon / geom.length),
+        kind: isWater ? 'water' : 'green',
+        area: wgt,
+      ));
+    }
+    // הגדולים תחילה.
+    regions.sort((a, b) => b.area.compareTo(a.area));
+    return [for (final r in regions) (center: r.center, kind: r.kind)];
+  }
+
+  /// נקודות-מִתאר של גבול-היישוב ב-[bbox] — הפוליגון הגדול-בשטח מבין
+  /// שטחי-מגורים/יישוב/גבול, מצופף כל ~15מ' לאורך הטבעת (כמו roadPoints).
+  /// משמש לאילוץ קנה-מידה/מיקום ברישום. רשימה ריקה כשלא נמצא מִתאר (לא זורק).
+  static Future<List<LatLng>> fetchPerimeterPoints(GeoBbox bbox) async {
+    final bb = '(${bbox.south},${bbox.west},${bbox.north},${bbox.east})';
+    final query =
+        '[out:json][timeout:60];('
+        'way["landuse"="residential"]$bb;'
+        'way["place"~"^(village|hamlet|town|isolated_dwelling)\$"]$bb;'
+        'way["boundary"]$bb;'
+        'relation["landuse"="residential"]$bb;'
+        'relation["place"~"^(village|hamlet|town|isolated_dwelling)\$"]$bb;'
+        'relation["boundary"]$bb;'
+        ');out geom;';
+    final body = await _post(query);
+    final elements =
+        (jsonDecode(body)['elements'] as List).cast<Map<String, dynamic>>();
+    // איסוף מועמדי-פוליגון: geometry של דרכים + geometry של חברי-יחסים.
+    final polys = <List<Map<String, dynamic>>>[];
+    for (final e in elements) {
+      final geom = (e['geometry'] as List?)?.cast<Map<String, dynamic>>();
+      if (geom != null && geom.length >= 3) polys.add(geom);
+      final members = (e['members'] as List?)?.cast<Map<String, dynamic>>();
+      if (members != null) {
+        for (final m in members) {
+          final mg = (m['geometry'] as List?)?.cast<Map<String, dynamic>>();
+          if (mg != null && mg.length >= 3) polys.add(mg);
+        }
+      }
+    }
+    if (polys.isEmpty) return const [];
+    // הפוליגון הגדול-בשטח = מִתאר היישוב (נוסחת-שרוך).
+    List<Map<String, dynamic>>? best;
+    var bestArea = 0.0;
+    for (final geom in polys) {
+      var area = 0.0;
+      for (var i = 0; i < geom.length; i++) {
+        final a = geom[i], b = geom[(i + 1) % geom.length];
+        area += (a['lon'] as num).toDouble() * (b['lat'] as num) -
+            (b['lon'] as num).toDouble() * (a['lat'] as num);
+      }
+      final wgt = area.abs();
+      if (wgt > bestArea) {
+        bestArea = wgt;
+        best = geom;
+      }
+    }
+    if (best == null) return const [];
+    // ציפוף נקודות לאורך המִתאר (כל ~15מ', כמו roadPoints).
+    final dist = const Distance();
+    final ring = [
+      for (final g in best)
+        LatLng((g['lat'] as num).toDouble(), (g['lon'] as num).toDouble()),
+    ];
+    final points = <LatLng>[];
+    for (var i = 0; i < ring.length; i++) {
+      final prev = ring[i];
+      final next = ring[(i + 1) % ring.length];
+      points.add(prev);
+      final d = dist(prev, next);
+      final steps = (d / 15).ceil().clamp(1, 200);
+      for (var s = 1; s < steps; s++) {
+        final t = s / steps;
+        points.add(LatLng(
+          prev.latitude + (next.latitude - prev.latitude) * t,
+          prev.longitude + (next.longitude - prev.longitude) * t,
+        ));
+      }
+    }
+    return points;
+  }
+
   static Future<String> _post(String query) async {
     // קידוד מפורש של גוף-הטופס (כמו --data-urlencode של curl) — שליחת Map
     // ל-http.post גרמה לבקשה ש-Overpass "תקע" עליה עד timeout.

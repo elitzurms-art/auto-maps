@@ -282,6 +282,8 @@ class AnchorMatcher {
     required List<LatLng> refGeo,
     List<bool>? scanRound,
     List<bool>? refRound,
+    List<int>? scanTy,
+    List<int>? refTy,
     required double aRe,
     required double aIm,
     required double bRe,
@@ -308,14 +310,19 @@ class AnchorMatcher {
     final a = _C(aRe, aIm), b = _C(bRe, bIm);
     final thr2 = inlierMeters * inlierMeters;
 
-    final pairs = _correspondences(scan, ref, a, b, thr2, scanRound, refRound);
+    final pairs = _correspondences(scan, ref, a, b, thr2, scanRound, refRound,
+        scanTy: scanTy, refTy: refTy);
+    // מסנן מאפיינים לא-דיסקרטיים (ירוק=2/מים=3/היקף=4) מהעוגנים המוחזרים —
+    // הם משמשים לאילוץ-הרישום בלבד, לא כנקודות-נעיצה לצרכן.
     final matches = [
       for (final p in pairs)
-        AnchorMatch(
-          scanPx[p.$1],
-          refGeo[p.$2],
-          isRoundabout: refRound?[p.$2] ?? false,
-        ),
+        if (refTy == null || refTy[p.$2] <= 1)
+          AnchorMatch(
+            scanPx[p.$1],
+            refGeo[p.$2],
+            isRoundabout:
+                refTy != null ? refTy[p.$2] == 1 : (refRound?[p.$2] ?? false),
+          ),
     ];
     if (matches.length < minInliers) return null;
 
@@ -661,6 +668,8 @@ class AnchorMatcher {
     required List<LatLng> refGeo,
     List<bool>? scanRound,
     List<bool>? refRound,
+    List<int>? scanType,
+    List<int>? refType,
     List<Point<double>>? scanRoad,
     List<LatLng>? refRoad,
   }) {
@@ -669,6 +678,8 @@ class AnchorMatcher {
           refGeo: refGeo,
           scanRound: scanRound,
           refRound: refRound,
+          scanType: scanType,
+          refType: refType,
           scanRoad: scanRoad,
           refRoad: refRoad,
         ));
@@ -679,6 +690,8 @@ class AnchorMatcher {
     required List<LatLng> refGeo,
     List<bool>? scanRound,
     List<bool>? refRound,
+    List<int>? scanType,
+    List<int>? refType,
     List<Point<double>>? scanRoad,
     List<LatLng>? refRoad,
     int minInliers = 4,
@@ -725,11 +738,12 @@ class AnchorMatcher {
       final b = ref[j] - scan[i] * _C(s, 0);
       final thr2 = pow(thrPx * s, 2).toDouble();
       var inl = 0;
-      for (final z in scan) {
-        final w = z * _C(s, 0) + b;
+      for (var si = 0; si < scan.length; si++) {
+        final w = scan[si] * _C(s, 0) + b;
         var best = double.infinity;
-        for (final r in ref) {
-          final d2 = (w - r).abs2;
+        for (var ri = 0; ri < ref.length; ri++) {
+          if (scanType != null && scanType[si] != refType![ri]) continue;
+          final d2 = (w - ref[ri]).abs2;
           if (d2 < best) best = d2;
         }
         if (best <= thr2) inl++;
@@ -753,7 +767,9 @@ class AnchorMatcher {
       for (var si = 0; si < scan.length; si++) {
         final w = scan[si] * _C(s, 0) + b;
         for (var ri = 0; ri < ref.length; ri++) {
-          if (scanRound != null &&
+          if (scanType != null) {
+            if (scanType[si] != refType![ri]) continue;
+          } else if (scanRound != null &&
               refRound != null &&
               scanRound[si] != refRound[ri]) {
             continue;
@@ -796,6 +812,8 @@ class AnchorMatcher {
       refGeo: refGeo,
       scanRound: scanRound,
       refRound: refRound,
+      scanTy: scanType,
+      refTy: refType,
       // a = s ממשי; y-מסך מהופך מטופל ב-buildResult דרך אותו קונבנציה?
       // buildResult משתמש ב-scan=_C(x,y) בלי היפוך — לכן מעבירים a,b
       // בקונבנציית y-לא-מהופך: היפוך-y שקול ל-conjugate. a נשאר ממשי (s),
@@ -1254,14 +1272,19 @@ class AnchorMatcher {
     _C b,
     double thr2,
     List<bool>? scanRound,
-    List<bool>? refRound,
-  ) {
+    List<bool>? refRound, {
+    List<int>? scanTy,
+    List<int>? refTy,
+  }) {
     final cand = <(double, int, int)>[];
     for (var s = 0; s < scan.length; s++) {
       final w = a * scan[s] + b;
       for (var r = 0; r < ref.length; r++) {
-        // אילוץ-סוג: כיכר מתאימה רק לכיכר (ולהפך).
-        if (scanRound != null &&
+        // אילוץ-סוג: מאפיין מתאים רק לבן-סוגו. [scanTy]/[refTy] (סוג כללי:
+        // צומת/כיכר/ירוק/מים) גובר על דגל-הכיכר הבוליאני כשנתון.
+        if (scanTy != null && refTy != null) {
+          if (scanTy[s] != refTy[r]) continue;
+        } else if (scanRound != null &&
             refRound != null &&
             scanRound[s] != refRound[r]) {
           continue;

@@ -241,6 +241,8 @@ class GeminiAnchorService {
     onStatus?.call('מאתר צמתים ומאפיינים על הסריקה (עיבוד-תמונה)...');
     var cvCandidates = const <MapFeature>[];
     var roadPointsScan = const <Point<double>>[];
+    var scanGreen = const <Point<double>>[]; // מרכזי-שטח ירוקים (מקור-px)
+    var scanWater = const <Point<double>>[]; // מרכזי-שטח כחולים/מים
     try {
       // דרך המתודה הסטטית — closure מקומי כאן גורר את onStatus (הקשר widget)
       // שאינו בר-שליחה ל-Isolate. detectFull מחזיר גם נקודות-כביש —
@@ -256,6 +258,19 @@ class GeminiAnchorService {
       roadPointsScan = [
         for (final p in det.roadPoints)
           Point(p.x * detScaleX, p.y * detScaleY),
+      ];
+      // מרכזי-שטחים-צבעוניים (מאפיין נוסף לספרייה) בפיקסלי-המקור.
+      final colors = await Isolate.run(
+          () => RoadJunctionDetector.detectColorCentroids(detImg));
+      scanGreen = [
+        for (final c in colors)
+          if (c.kind == 'green')
+            Point(c.center.x * detScaleX, c.center.y * detScaleY),
+      ];
+      scanWater = [
+        for (final c in colors)
+          if (c.kind == 'water')
+            Point(c.center.x * detScaleX, c.center.y * detScaleY),
       ];
     } catch (_) {}
     // מצב מהיר: קח רק את המועמדים החזקים ביותר (הגלאי מחזיר ממוינים).
@@ -308,6 +323,8 @@ class GeminiAnchorService {
             scanRound: scanRound,
             roadPointsScan: roadPointsScan,
             areaHint: effectiveHint,
+            scanGreen: scanGreen,
+            scanWater: scanWater,
           );
         } else {
           // מפה מסובבת: מיישרים אותה (deskew) → מזהים על גרסה צירית
@@ -338,6 +355,8 @@ class GeminiAnchorService {
               scanRound: dsk.rounds,
               roadPointsScan: dsk.roads,
               areaHint: effectiveHint,
+              scanGreen: dsk.green,
+              scanWater: dsk.water,
               unmapPixel: unmap,
               cropW: dsk.cropW,
               cropH: dsk.cropH,
@@ -981,6 +1000,8 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     List<Point<double>> junctions,
     List<bool> rounds,
     List<Point<double>> roads,
+    List<Point<double>> green,
+    List<Point<double>> water,
     double skew,
     int minX,
     int minY,
@@ -1022,10 +1043,16 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
         rounds.add(f.kind == MapFeatureKind.roundabout);
       }
     }
+    // מרכזי-צבע בפריים-המיושר (אותה מערכת-קואורדינטות כמו הצמתים).
+    final colors = RoadJunctionDetector.detectColorCentroids(cropped);
+    final green = [for (final c in colors) if (c.kind == 'green') c.center];
+    final water = [for (final c in colors) if (c.kind == 'water') c.center];
     return (
       junctions: junctions,
       rounds: rounds,
       roads: det.roadPoints,
+      green: green,
+      water: water,
       skew: skew,
       minX: minX,
       minY: minY,
@@ -1060,6 +1087,8 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     required List<bool> scanRound,
     required List<Point<double>> roadPointsScan,
     required String areaHint,
+    List<Point<double>> scanGreen = const [],
+    List<Point<double>> scanWater = const [],
     Offset Function(Offset)? unmapPixel,
     int? cropW,
     int? cropH,
@@ -1071,13 +1100,32 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     if (raw == null) return null;
     final dLat = (raw.north - raw.south) * 0.15;
     final dLon = (raw.east - raw.west) * 0.15;
-    final osm = await OverpassService.fetchJunctions((
+    final bbox = (
       south: raw.south - dLat,
       west: raw.west - dLon,
       north: raw.north + dLat,
       east: raw.east + dLon,
-    ));
+    );
+    final osm = await OverpassService.fetchJunctions(bbox);
     if (osm.junctions.length < 4) return null;
+
+    // ספריית-מאפיינים: מלבד צמתים (0)/כיכרות (1) — גם **מרכזי שטחים
+    // צבעוניים** ירוק (2)/מים (3), עם אילוץ-סוג ברישום. עוגני-הצבע שוברים
+    // פתרונות-שווא (למשל קנה-מידה כפול) כי ירוק חייב להתאים לירוק.
+    final landuse = await OverpassService.fetchLanduseCentroids(bbox);
+    final refGeo = <LatLng>[
+      ...osm.junctions,
+      for (final l in landuse) l.center,
+    ];
+    final refType = <int>[
+      for (final r in osm.isRoundabout) r ? 1 : 0,
+      for (final l in landuse) l.kind == 'water' ? 3 : 2,
+    ];
+    final baseScanType = <int>[
+      for (final r in scanRound) r ? 1 : 0,
+      for (var i = 0; i < scanGreen.length; i++) 2,
+      for (var i = 0; i < scanWater.length; i++) 3,
+    ];
 
     // רישום נעול-סיבוב (θ=0). מיושר-צפון → ישירות; מפה מסובבת → הצמתים
     // כבר יושרו (deskew), אך "מעלה" עשוי להיות 90/180/270 — מנסים 4
@@ -1085,20 +1133,25 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     // המקור ע"י [unmapPixel] (בהרכבה עם היפוך-הרבע).
     final deskewMode = cropW != null && cropH != null;
     final quarters = deskewMode ? 4 : 1;
+    Point<double> rotK(Point<double> p, int k) => deskewMode
+        ? _rot90(p, k, cropW.toDouble(), cropH.toDouble())
+        : p;
     MatchResult? res;
     var bestK = 0;
     for (var k = 0; k < quarters; k++) {
-      final jr = deskewMode
-          ? [for (final j in junctionPx) _rot90(j, k, cropW.toDouble(), cropH.toDouble())]
-          : junctionPx;
+      final scanCombined = <Point<double>>[
+        for (final j in junctionPx) rotK(j, k),
+        for (final g in scanGreen) rotK(g, k),
+        for (final w in scanWater) rotK(w, k),
+      ];
       final rr = deskewMode
-          ? [for (final r in roadPointsScan) _rot90(r, k, cropW.toDouble(), cropH.toDouble())]
+          ? [for (final r in roadPointsScan) rotK(r, k)]
           : roadPointsScan;
       final r = await AnchorMatcher.registerNorthUpInIsolate(
-        scanPx: jr,
-        refGeo: osm.junctions,
-        scanRound: scanRound,
-        refRound: osm.isRoundabout,
+        scanPx: scanCombined,
+        refGeo: refGeo,
+        scanType: baseScanType,
+        refType: refType,
         scanRoad: rr.isEmpty ? null : rr,
         refRoad: osm.roadPoints,
       );
