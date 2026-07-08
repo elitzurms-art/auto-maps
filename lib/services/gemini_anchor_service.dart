@@ -339,6 +339,8 @@ class GeminiAnchorService {
               roadPointsScan: dsk.roads,
               areaHint: effectiveHint,
               unmapPixel: unmap,
+              cropW: dsk.cropW,
+              cropH: dsk.cropH,
             );
           }
         }
@@ -982,6 +984,8 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     double skew,
     int minX,
     int minY,
+    int cropW,
+    int cropH,
     int deskW,
     int deskH,
     int detW,
@@ -1025,6 +1029,8 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
       skew: skew,
       minX: minX,
       minY: minY,
+      cropW: maxX - minX,
+      cropH: maxY - minY,
       deskW: desk.width,
       deskH: desk.height,
       detW: detImg.width,
@@ -1032,14 +1038,31 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     );
   }
 
+  /// מסובב נקודה ב-k רבעי-סיבוב (90°·k) סביב מרכז [cw]×[ch] — לטיפול
+  /// באמביגואיית-90° של deskew (המפה יושרה לציר אך "מעלה" עשוי להיות
+  /// 90/180/270). מדויק (בלי אינטרפולציה).
+  static Point<double> _rot90(Point<double> p, int k, double cw, double ch) {
+    var dx = p.x - cw / 2, dy = p.y - ch / 2;
+    for (var i = 0; i < (k & 3); i++) {
+      final nx = -dy, ny = dx;
+      dx = nx;
+      dy = ny;
+    }
+    return Point(dx + cw / 2, dy + ch / 2);
+  }
+
   /// [unmapPixel]: כשהצמתים ניתנו בפריים **מיושר** (deskew), הפונקציה
   /// ממפה כל פיקסל-עוגן חזרה לקואורדינטות התמונה המקורית (המסובבת).
+  /// [cropW]/[cropH]: ממדי-הפריים-המיושר — כשנתונים, מנסה 4 אוריינטציות
+  /// (90°·k) ובוחר את הטובה (טיפול באמביגואיית-90° של deskew).
   Future<List<GeminiAnchorSuggestion>?> _classicalMatch({
     required List<Point<double>> junctionPx,
     required List<bool> scanRound,
     required List<Point<double>> roadPointsScan,
     required String areaHint,
     Offset Function(Offset)? unmapPixel,
+    int? cropW,
+    int? cropH,
   }) async {
     // bbox צמוד ליישוב — ריפוד רחב בולע יישוב שכן עם רשת-כבישים דומה
     // וגורם להתאמות-שווא (נצפה: נקודות נחתו בחיספין במקום בנוב).
@@ -1057,26 +1080,50 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     if (osm.junctions.length < 4) return null;
 
     // רישום נעול-סיבוב (θ=0). מיושר-צפון → ישירות; מפה מסובבת → הצמתים
-    // כבר יושרו (deskew) לפני הקריאה, כך שכאן זה תמיד north-up. הסיבוב
-    // מוחזר לקואורדינטות-המקור ע"י [unmapPixel].
-    final res = await AnchorMatcher.registerNorthUpInIsolate(
-      scanPx: junctionPx,
-      refGeo: osm.junctions,
-      scanRound: scanRound,
-      refRound: osm.isRoundabout,
-      scanRoad: roadPointsScan.isEmpty ? null : roadPointsScan,
-      refRoad: osm.roadPoints,
-    );
+    // כבר יושרו (deskew), אך "מעלה" עשוי להיות 90/180/270 — מנסים 4
+    // רבעי-סיבוב ובוחרים את בעל-ה-inliers הגבוה. הסיבוב מוחזר לקואורדינטות-
+    // המקור ע"י [unmapPixel] (בהרכבה עם היפוך-הרבע).
+    final deskewMode = cropW != null && cropH != null;
+    final quarters = deskewMode ? 4 : 1;
+    MatchResult? res;
+    var bestK = 0;
+    for (var k = 0; k < quarters; k++) {
+      final jr = deskewMode
+          ? [for (final j in junctionPx) _rot90(j, k, cropW.toDouble(), cropH.toDouble())]
+          : junctionPx;
+      final rr = deskewMode
+          ? [for (final r in roadPointsScan) _rot90(r, k, cropW.toDouble(), cropH.toDouble())]
+          : roadPointsScan;
+      final r = await AnchorMatcher.registerNorthUpInIsolate(
+        scanPx: jr,
+        refGeo: osm.junctions,
+        scanRound: scanRound,
+        refRound: osm.isRoundabout,
+        scanRoad: rr.isEmpty ? null : rr,
+        refRoad: osm.roadPoints,
+      );
+      if (r != null && (res == null || r.inliers > res.inliers)) {
+        res = r;
+        bestK = k;
+      }
+    }
     // דורשים יחס-inliers סביר — מגן מפני התאמה-חלקית מקרית.
     final minReq = max(4, (junctionPx.length * 0.35).round());
     if (res == null || res.inliers < minReq) return null;
 
+    // מיפוי-עוגן חזרה: היפוך-הרבע (בפריים-המיושר) ואז unmap למקור.
+    Offset toOrig(Point<double> px) {
+      final p = deskewMode
+          ? _rot90(px, (4 - bestK) & 3, cropW.toDouble(), cropH.toDouble())
+          : px;
+      final o = Offset(p.x, p.y);
+      return unmapPixel != null ? unmapPixel(o) : o;
+    }
+
     return [
       for (final m in res.matches)
         GeminiAnchorSuggestion(
-          pixel: unmapPixel != null
-              ? unmapPixel(Offset(m.pixel.x, m.pixel.y))
-              : Offset(m.pixel.x, m.pixel.y),
+          pixel: toOrig(m.pixel),
           world: m.world,
           name: m.isRoundabout ? 'כיכר' : 'צומת כבישים',
           confidence: 1,
