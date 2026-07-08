@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
@@ -7,6 +8,7 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
 import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
@@ -114,6 +116,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   // גובה (מטרים) במרכז-המפה — נשלף מ-API בהשהיה; null עד שנטען.
   double? _cursorElevation;
   Timer? _elevDebounce;
+  // מרכז-רמז מהשם-קובץ (ג'יאוקוד) — הדקירה הראשונה במצב-ידני תיפתח שם.
+  LatLng? _hintCenter;
   // מנוי לאירועי-המפה (הזזה) — מבוטל ב-dispose.
   StreamSubscription? _mapEventSub;
 
@@ -140,6 +144,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     OcrService.available().then((ok) {
       if (mounted) setState(() => _ocrAvailable = ok);
     });
+    // רמז-מיקום משם-הקובץ — כדי שהדקירה הראשונה במצב-ידני תיפתח באזור הנכון.
+    _resolveFilenameHint();
     // מעקב אחר הזזת-המפה — מעדכן את קריאת-הקואורדינטה ואת רשת-הקואורדינטות.
     _mapEventSub = _mapController.mapEventStream.listen((_) {
       if (!mounted) return;
@@ -317,6 +323,38 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       _imageHeight = frame.image.height;
     });
     frame.image.dispose();
+  }
+
+  /// גוזר שם-מקום משם-הקובץ (מסיר "מפה/מפת", מספרים, "page N") ומריץ
+  /// ג'יאוקוד ב-Nominatim (מוגבל לישראל) → [_hintCenter]. הדקירה-הראשונה
+  /// במצב-ידני תיפתח שם (אחר-כך ממרכזים לנקודה הקודמת דרך [_lastWorldPoint]).
+  Future<void> _resolveFilenameHint() async {
+    var name = p
+        .basenameWithoutExtension(widget.imagePath)
+        .replaceAll(RegExp(r'[_\- ]?page ?\d+', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\bמפ[הת]\b'), '')
+        .replaceAll(RegExp(r'[0-9]+'), '')
+        .replaceAll(RegExp(r'[_\-]+'), ' ')
+        .trim();
+    if (name.length < 2) return;
+    try {
+      final uri = Uri.parse(
+        'https://nominatim.openstreetmap.org/search'
+        '?q=${Uri.encodeComponent(name)}&countrycodes=il&format=json&limit=1',
+      );
+      final r = await http
+          .get(uri, headers: {'User-Agent': 'auto_maps/1.0'})
+          .timeout(const Duration(seconds: 8));
+      if (r.statusCode != 200) return;
+      final list = jsonDecode(r.body) as List;
+      if (list.isEmpty) return;
+      final m = list.first as Map<String, dynamic>;
+      final lat = double.tryParse('${m['lat']}');
+      final lon = double.tryParse('${m['lon']}');
+      if (lat != null && lon != null && mounted) {
+        setState(() => _hintCenter = LatLng(lat, lon));
+      }
+    } catch (_) {}
   }
 
   void _pickOnImage(Offset pixelPosition) {
@@ -1515,13 +1553,15 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   Widget _buildMapView() {
     final sources = _refMap.availableSources();
     // מרכוז-אקטיבי: ה-MapController ה"דביק" זוכר מרכז ישן ומתעלם מ-
-    // initialCenter ברי-בנייה. מזיזים ידנית לנקודה האחרונה כשהיא השתנתה.
-    final target = _lastWorldPoint;
+    // initialCenter ברי-בנייה. יעד: הנקודה-האחרונה (אחרי הדקירה הראשונה),
+    // אחרת רמז-שם-הקובץ (הדקירה הראשונה) — מזיזים כשהיעד השתנה.
+    final target = _lastWorldPoint ?? _hintCenter;
+    final zoom = _lastWorldPoint != null ? 16.0 : 14.0;
     if (target != null && target != _mapCenteredOn) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         try {
-          _mapController.move(target, 16);
+          _mapController.move(target, zoom);
           _mapCenteredOn = target;
         } catch (_) {}
       });
@@ -1531,8 +1571,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         FlutterMap(
           mapController: _mapController,
           options: MapOptions(
-            initialCenter: _lastWorldPoint ?? const LatLng(31.5, 34.8),
-            initialZoom: _lastWorldPoint != null ? 14 : 8,
+            initialCenter: target ?? const LatLng(31.5, 34.8),
+            initialZoom: target != null ? zoom : 8,
           ),
           children: [
             ..._refMap.buildActiveTileLayers(),
