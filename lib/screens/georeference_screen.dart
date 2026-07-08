@@ -9,7 +9,6 @@ import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-import '../services/ai_engine.dart';
 import '../services/gdal_warp_service.dart';
 import '../services/gemini_anchor_service.dart';
 import '../services/reference_map_controller.dart';
@@ -380,12 +379,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       })?> _promptAreaHint() async {
     final initial = await GeminiAnchorService.getAreaHint() ?? '';
     if (!mounted) return null;
-    // מנוע זמין לקריאת-המצפן? Ollama תמיד; Gemini רק עם מפתח.
-    final engine = await AiEngine.engine();
-    final key = await GeminiAnchorService.getApiKey() ?? '';
-    final compassEngineReady =
-        engine == AiEngine.ollama || key.isNotEmpty;
-    if (!mounted) return null;
     final result = await showDialog<
         ({
           String hint,
@@ -398,7 +391,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       builder: (ctx) => _OrientationDialog(
         imagePath: widget.imagePath,
         initialHint: initial,
-        compassApiKey: compassEngineReady ? key : null,
       ),
     );
     if (result != null && result.hint.isNotEmpty) {
@@ -1351,14 +1343,10 @@ class _OrientationDialog extends StatefulWidget {
   const _OrientationDialog({
     required this.imagePath,
     required this.initialHint,
-    required this.compassApiKey,
   });
 
   final String imagePath;
   final String initialHint;
-
-  /// null → אין מנוע זמין לקריאת-מצפן (מדלגים ישר לבחירה-ידנית).
-  final String? compassApiKey;
 
   @override
   State<_OrientationDialog> createState() => _OrientationDialogState();
@@ -1376,23 +1364,16 @@ class _OrientationDialogState extends State<_OrientationDialog> {
   @override
   void initState() {
     super.initState();
-    if (widget.compassApiKey != null) {
-      _detecting = true;
-      _detectCompass();
-    } else {
-      _detectDone = true; // בלי מנוע — בחירה-ידנית מיד
-    }
+    _detecting = true;
+    _detectCompass();
   }
 
   Future<void> _detectCompass() async {
     ({double deg, bool resolved})? c;
     try {
       c = await GeminiAnchorService()
-          .detectCompass(
-            imagePath: widget.imagePath,
-            apiKey: widget.compassApiKey!,
-          )
-          .timeout(const Duration(seconds: 40));
+          .detectCompass(imagePath: widget.imagePath)
+          .timeout(const Duration(seconds: 20));
     } catch (_) {
       c = null;
     }
@@ -1524,14 +1505,15 @@ class _OrientationDialogState extends State<_OrientationDialog> {
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            'עיבוד הצליח! נמצא חץ-צפון '
-                            '(סיבוב ≈${_compassDeg!.round()}°). לחץ המשך.',
+                            'עיבוד הצליח! זוהה חץ-צפון במפה '
+                            '(${_compassResolved ? 'כיוון' : 'ציר'} '
+                            '≈${_compassDeg!.round()}°). לחץ המשך.',
                           ),
                         ),
                       ],
                     ),
                   )
-                else if (_detectDone && widget.compassApiKey != null)
+                else if (_detectDone)
                   const Text(
                     'לא נמצא חץ-צפון במפה — בחר את כיוון המפה ידנית:',
                     style: TextStyle(fontSize: 13, color: Colors.black54),

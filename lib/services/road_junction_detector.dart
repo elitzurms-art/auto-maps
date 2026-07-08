@@ -1432,15 +1432,15 @@ class RoadJunctionDetector {
     return out;
   }
 
-  /// **קורא-מצפן קלאסי** מתקריב-המצפן (בפיקסלים, בלי מודל). מחזיר את זווית-
-  /// הצפון ב**מעלות כיוון-השעון ממעלה** (0=מעלה, 90=ימין) ו-[resolved] —
-  /// האם הכיוון חד-משמעי (צפון ודאי) או רק **ציר** (צפון/דרום לא-מוכרע,
-  /// הגיאומטריה תבחר). עדיפויות לפי סוג-מצפן:
-  /// 1. **אדום → צפון** (מחט/חץ אדום): הכיוון מהמרכז למרכז-האדום, resolved.
-  /// 2. **חץ אסימטרי**: הקוץ-הארוך מובהק מהמנוגד → ראש-החץ = צפון, resolved.
-  /// 3. **שושנת-רוחות סימטרית**: הקוץ-הארוך = ציר (resolved=false).
-  /// null אם אין מבנה-מצפן ברור בתקריב.
-  static ({double deg, bool resolved})? estimateCompassNorth(img.Image im) {
+  /// **גלאי-מצפן קלאסי מלא** (בלי מודל): סורק את כל המפה, מאתר את סמל-
+  /// המצפן — רכיב-כהה **סימטרי-רדיאלית** (כוכב/שושנת-רוחות), **מבודד**
+  /// (יושב בלובן), הגדול מבין המועמדים — וקורא ממנו את זווית-הצפון.
+  /// מחזיר (deg cwFromUp, resolved): resolved=true כשהצפון חד-משמעי
+  /// (אדום/חץ-אסימטרי), false כשזה ציר-בלבד (הגיאומטריה תבחר N/S). null אם
+  /// לא נמצא. רץ ב-Isolate דרך [detectCompassInIsolate].
+  static ({double deg, bool resolved})? detectCompassInImage(img.Image src) {
+    var im = src;
+    if (im.width > 1400) im = img.copyResize(im, width: 1400);
     final w = im.width, h = im.height;
     final dark = List.filled(w * h, false);
     final red = List.filled(w * h, false);
@@ -1452,18 +1452,18 @@ class RoadJunctionDetector {
         if (r > 120 && r > g * 1.6 && r > b * 1.6) red[y * w + x] = true;
       }
     }
-    // הרכיב-הכהה הגדול ביותר = גוף-המצפן.
     final lbl = List.filled(w * h, 0);
-    var cur = 0, bestLbl = 0, bestSz = 0;
+    var cur = 0;
+    final comps = <int, List<int>>{};
     for (var i = 0; i < w * h; i++) {
       if (dark[i] && lbl[i] == 0) {
         cur++;
-        var sz = 0;
+        final cells = <int>[];
         final st = <int>[i];
         lbl[i] = cur;
         while (st.isNotEmpty) {
           final q = st.removeLast();
-          sz++;
+          cells.add(q);
           final qx = q % w, qy = q ~/ w;
           for (final d in const [
             [1, 0], [-1, 0], [0, 1], [0, -1],
@@ -1478,67 +1478,103 @@ class RoadJunctionDetector {
             }
           }
         }
-        if (sz > bestSz) {
-          bestSz = sz;
-          bestLbl = cur;
-        }
+        comps[cur] = cells;
       }
     }
-    if (bestSz < 30) return null;
-    var cx = 0.0, cy = 0.0, n = 0;
-    for (var y = 0; y < h; y++) {
-      for (var x = 0; x < w; x++) {
-        if (lbl[y * w + x] == bestLbl) {
-          cx += x;
-          cy += y;
-          n++;
+    // מועמד-מצפן: קומפקטי, סימטרי-רדיאלית מאוד, מבודד בלובן.
+    ({double cx, double cy, double R, List<int> cells})? best;
+    for (final cells in comps.values) {
+      final sz = cells.length;
+      if (sz < 400 || sz > 50000) continue;
+      var minx = w, miny = h, maxx = 0, maxy = 0;
+      var cx = 0.0, cy = 0.0;
+      for (final c in cells) {
+        final x = c % w, y = c ~/ w;
+        cx += x;
+        cy += y;
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
+      }
+      cx /= sz;
+      cy /= sz;
+      final bw = maxx - minx + 1, bh = maxy - miny + 1;
+      final asp = bw / bh;
+      if (asp < 0.5 || asp > 2.0) continue;
+      if (bw > w * 0.25 || bh > h * 0.25) continue;
+      final reach = List.filled(36, 0.0);
+      var R = 0.0;
+      for (final c in cells) {
+        final x = c % w, y = c ~/ w;
+        final dx = x - cx, dy = y - cy;
+        final r = sqrt(dx * dx + dy * dy);
+        if (r > R) R = r;
+        var ang = atan2(dy, dx) * 180 / pi;
+        if (ang < 0) ang += 360;
+        final bin = (ang ~/ 10) % 36;
+        if (r > reach[bin]) reach[bin] = r;
+      }
+      if (R < 12 || R > 120) continue;
+      var spikes = 0;
+      for (final v in reach) {
+        if (v > 0.5 * R) spikes++;
+      }
+      var sym = 0.0;
+      for (var b = 0; b < 18; b++) {
+        sym += 1 - ((reach[b] - reach[b + 18]).abs() / (R + 1));
+      }
+      sym /= 18;
+      if (spikes < 30 || sym < 0.88) continue;
+      // בידוד: טבעת 1.5R..2R סביב המרכז — מצפן חופשי → רוב-לבן.
+      var ringDark = 0, ringTot = 0;
+      for (var deg = 0; deg < 360; deg += 6) {
+        for (var rr = 1.5; rr <= 2.0; rr += 0.25) {
+          final px = (cx + R * rr * cos(deg * pi / 180)).round();
+          final py = (cy + R * rr * sin(deg * pi / 180)).round();
+          if (px < 0 || py < 0 || px >= w || py >= h) continue;
+          ringTot++;
+          if (dark[py * w + px]) ringDark++;
         }
       }
-    }
-    cx /= n;
-    cy /= n;
-    var rad = 0.0;
-    for (var y = 0; y < h; y++) {
-      for (var x = 0; x < w; x++) {
-        if (lbl[y * w + x] == bestLbl) {
-          final dx = x - cx, dy = y - cy;
-          final r = sqrt(dx * dx + dy * dy);
-          if (r > rad) rad = r;
-        }
+      if (ringTot == 0 || 1 - ringDark / ringTot < 0.7) continue;
+      // הגדול מבין השורדים (המצפן לרוב גדול מסמלים-עגולים קטנים).
+      if (best == null || R > best.R) {
+        best = (cx: cx, cy: cy, R: R, cells: cells);
       }
     }
+    if (best == null) return null;
+    final b = best;
     double toCwUp(double mathDeg) => (mathDeg + 90) % 360;
-    // 1) אדום בתוך רדיוס-המצפן → צפון = כיוון מרכז→מרכז-האדום.
+    // אדום בתוך רדיוס-המצפן → צפון חד-משמעי.
     var rx = 0.0, ry = 0.0, rn = 0;
     for (var y = 0; y < h; y++) {
       for (var x = 0; x < w; x++) {
         if (!red[y * w + x]) continue;
-        final dx = x - cx, dy = y - cy;
-        if (sqrt(dx * dx + dy * dy) > rad * 1.3) continue;
+        final dx = x - b.cx, dy = y - b.cy;
+        if (sqrt(dx * dx + dy * dy) > b.R * 1.3) continue;
         rx += x;
         ry += y;
         rn++;
       }
     }
     if (rn >= 8) {
-      final dx = rx / rn - cx, dy = ry / rn - cy;
+      final dx = rx / rn - b.cx, dy = ry / rn - b.cy;
       var m = atan2(dy, dx) * 180 / pi;
       if (m < 0) m += 360;
       return (deg: toCwUp(m), resolved: true);
     }
-    // 2/3) קוץ-ארוך → ציר. reach לכל זווית (בינים של 1°).
+    // אחרת קוץ-ארוך → ציר.
     final reach = List.filled(360, 0.0);
-    for (var y = 0; y < h; y++) {
-      for (var x = 0; x < w; x++) {
-        if (lbl[y * w + x] != bestLbl) continue;
-        final dx = x - cx, dy = y - cy;
-        final r = sqrt(dx * dx + dy * dy);
-        if (r < 3) continue;
-        var ang = atan2(dy, dx) * 180 / pi;
-        if (ang < 0) ang += 360;
-        final bin = ang.round() % 360;
-        if (r > reach[bin]) reach[bin] = r;
-      }
+    for (final c in b.cells) {
+      final x = c % w, y = c ~/ w;
+      final dx = x - b.cx, dy = y - b.cy;
+      final r = sqrt(dx * dx + dy * dy);
+      if (r < 3) continue;
+      var ang = atan2(dy, dx) * 180 / pi;
+      if (ang < 0) ang += 360;
+      final bin = ang.round() % 360;
+      if (r > reach[bin]) reach[bin] = r;
     }
     final sm = List.filled(360, 0.0);
     for (var i = 0; i < 360; i++) {
@@ -1556,10 +1592,16 @@ class RoadJunctionDetector {
         peak = i;
       }
     }
-    // חץ אסימטרי: הקוץ מובהק פי-1.4 מהמנוגד → ראש = צפון (resolved).
     final resolved = pv > sm[(peak + 180) % 360] * 1.4;
     return (deg: toCwUp(peak.toDouble()), resolved: resolved);
   }
+
+  /// [detectCompassInImage] ב-Isolate (סריקת-רכיבים כבדה).
+  static Future<({double deg, bool resolved})?> detectCompassInIsolate(
+      img.Image src) {
+    return Isolate.run(() => detectCompassInImage(src));
+  }
+
 }
 
 class _Cluster {

@@ -576,92 +576,18 @@ class GeminiAnchorService {
     }
   }
 
-  /// **מאתר** את תיבת חץ-הצפון/שושנת-הרוחות (משימת-איתור — חוזק המודל, גם
-  /// המקומי; קריאת-הזווית עצמה נעשית **בפיקסלים** ולא במודל, שחלש בזוויות).
-  /// מחזיר תיבה מנורמלת 0..1 (x0,y0,x1,y1), או null אם לא נמצא.
-  Future<({double x0, double y0, double x1, double y1})?> _locateCompass({
-    required List<int> jpeg,
-    required String apiKey,
-  }) async {
-    const prompt = '''
-במפה שלפניך יש (אולי) חץ-צפון או שושנת-רוחות/מצפן — עיגול עם כוכב או חץ
-והאותיות N S E W (לעיתים חץ קטן, לעיתים מחט אדומה). אם יש — החזר תיבה-
-תוחמת **צמודה** סביבו בקואורדינטות מנורמלות 0-1000 (x שמאל→ימין,
-y מעלה→מטה): x0,y0 פינה שמאלית-עליונה, x1,y1 ימנית-תחתונה.
-אם אין מצפן/חץ-צפון במפה — החזר found=false.''';
-    final body = {
-      'contents': [
-        {
-          'parts': [
-            {'text': prompt},
-            {
-              'inline_data': {
-                'mime_type': 'image/jpeg',
-                'data': base64Encode(jpeg),
-              },
-            },
-          ],
-        },
-      ],
-      'generationConfig': {
-        'response_mime_type': 'application/json',
-        'response_schema': {
-          'type': 'OBJECT',
-          'properties': {
-            'found': {'type': 'BOOLEAN'},
-            'x0': {'type': 'NUMBER'},
-            'y0': {'type': 'NUMBER'},
-            'x1': {'type': 'NUMBER'},
-            'y1': {'type': 'NUMBER'},
-          },
-          'required': ['found', 'x0', 'y0', 'x1', 'y1'],
-        },
-      },
-    };
-    final text = await _generate(body, apiKey);
-    final root = jsonDecode(text) as Map<String, dynamic>;
-    if (root['found'] != true) return null;
-    double f(String k) => ((root[k] as num?)?.toDouble() ?? 0) / 1000;
-    final x0 = f('x0'), y0 = f('y0'), x1 = f('x1'), y1 = f('y1');
-    if (x1 <= x0 || y1 <= y0) return null;
-    return (x0: x0, y0: y0, x1: x1, y1: y1);
-  }
-
-  /// נוחות ל-UI: **מודל מאתר** את המצפן → חותכים את התיבה (עם ריפוד) →
-  /// **קורא-קלאסי** את הזווית מהפיקסלים. מחזיר (זווית cwFromUp, resolved)
-  /// — resolved=true כשהצפון חד-משמעי (אדום/חץ), false כשזה ציר בלבד
-  /// (הגיאומטריה תבחר צפון/דרום). null אם אין מצפן / כשל.
+  /// נוחות ל-UI: מזהה את חץ-הצפון/שושנת-הרוחות וקורא את זוויתו — **הכל
+  /// בפיקסלים, בלי מודל** (מהיר, אמין, ללא תלות במנוע). מחזיר (זווית
+  /// cwFromUp, resolved) — resolved=true כשהצפון חד-משמעי (אדום/חץ), false
+  /// כשזה ציר בלבד (הגיאומטריה תבחר צפון/דרום). null אם לא נמצא מצפן.
   Future<({double deg, bool resolved})?> detectCompass({
     required String imagePath,
-    required String apiKey,
   }) async {
     try {
       final bytes = await File(imagePath).readAsBytes();
       final decoded = img.decodeImage(bytes);
       if (decoded == null) return null;
-      var sent = decoded;
-      if (decoded.width > 1600 || decoded.height > 1600) {
-        sent = decoded.width >= decoded.height
-            ? img.copyResize(decoded, width: 1600)
-            : img.copyResize(decoded, height: 1600);
-      }
-      final box = await _locateCompass(
-        jpeg: img.encodeJpg(sent, quality: 85),
-        apiKey: apiKey,
-      );
-      if (box == null) return null;
-      // חיתוך התיבה מהמקור (רזולוציה מלאה) עם ריפוד 25% — הקורא צריך
-      // מרווח לקוצים; חיתוך צמוד מדי חותך אותם.
-      final W = decoded.width, H = decoded.height;
-      final bw = (box.x1 - box.x0) * W, bh = (box.y1 - box.y0) * H;
-      final padX = bw * 0.25, padY = bh * 0.25;
-      final cx0 = ((box.x0 * W) - padX).round().clamp(0, W - 2);
-      final cy0 = ((box.y0 * H) - padY).round().clamp(0, H - 2);
-      final cx1 = ((box.x1 * W) + padX).round().clamp(cx0 + 1, W);
-      final cy1 = ((box.y1 * H) + padY).round().clamp(cy0 + 1, H);
-      final crop = img.copyCrop(decoded,
-          x: cx0, y: cy0, width: cx1 - cx0, height: cy1 - cy0);
-      return RoadJunctionDetector.estimateCompassNorth(crop);
+      return await RoadJunctionDetector.detectCompassInIsolate(decoded);
     } catch (_) {
       return null;
     }
