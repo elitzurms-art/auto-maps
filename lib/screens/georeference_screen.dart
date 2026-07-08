@@ -329,12 +329,15 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   /// ג'יאוקוד ב-Nominatim (מוגבל לישראל) → [_hintCenter]. הדקירה-הראשונה
   /// במצב-ידני תיפתח שם (אחר-כך ממרכזים לנקודה הקודמת דרך [_lastWorldPoint]).
   Future<void> _resolveFilenameHint() async {
+    // ⚠️ בלי \b — הוא ASCII ולא תופס אותיות עבריות (משאיר "מפת" ומכשיל
+    // את הג'יאוקוד). מסירים "מפה/מפת/מושב/קיבוץ" ומספרים ישירות.
     var name = p
         .basenameWithoutExtension(widget.imagePath)
         .replaceAll(RegExp(r'[_\- ]?page ?\d+', caseSensitive: false), '')
-        .replaceAll(RegExp(r'\bמפ[הת]\b'), '')
-        .replaceAll(RegExp(r'[0-9]+'), '')
+        .replaceAll(RegExp(r'מפ[הת]'), ' ')
+        .replaceAll(RegExp(r'[0-9]+'), ' ')
         .replaceAll(RegExp(r'[_\-]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
     if (name.length < 2) return;
     try {
@@ -353,6 +356,12 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       final lon = double.tryParse('${m['lon']}');
       if (lat != null && lon != null && mounted) {
         setState(() => _hintCenter = LatLng(lat, lon));
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(SnackBar(
+            content: Text('אזור מהשם-קובץ: "$name" — המפה תיפתח שם'),
+            duration: const Duration(seconds: 3),
+          ));
       }
     } catch (_) {}
   }
