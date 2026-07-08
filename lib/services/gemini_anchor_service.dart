@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:ui' show Offset;
 
@@ -298,21 +299,54 @@ class GeminiAnchorService {
     if (classicalMatchEnabled &&
         effectiveHint.isNotEmpty &&
         junctionPx.length >= 4) {
-      onStatus?.call('מתאים רשת-כבישים מול OSM (בלי AI)...');
       try {
-        final classical = await _classicalMatch(
-          junctionPx: junctionPx,
-          scanRound: scanRound,
-          roadPointsScan: roadPointsScan,
-          areaHint: effectiveHint,
-          northUp: northUp,
-        );
+        List<GeminiAnchorSuggestion>? classical;
+        if (northUp) {
+          onStatus?.call('מתאים רשת-כבישים מול OSM (בלי AI)...');
+          classical = await _classicalMatch(
+            junctionPx: junctionPx,
+            scanRound: scanRound,
+            roadPointsScan: roadPointsScan,
+            areaHint: effectiveHint,
+          );
+        } else {
+          // מפה מסובבת: מיישרים אותה (deskew) → מזהים על גרסה צירית
+          // (הגלאי חסין רק לתוכן צירי) → רישום north-up → מיפוי-עוגנים
+          // חזרה לקואורדינטות-המקור המסובבות.
+          onStatus?.call('מיישר את המפה ומאתר צמתים...');
+          final dsk =
+              await Isolate.run(() => _deskewDetectSync(detImg));
+          if (dsk != null && dsk.junctions.length >= 4) {
+            // מיפוי פיקסל-מיושר → פיקסל-מקור: הזזת-חיתוך → סיבוב-הפוך
+            // סביב מרכז-detImg → קנה-מידה למקור. (סימן -skew אומת ויזואלית.)
+            final t = -dsk.skew * pi / 180, ct = cos(t), st = sin(t);
+            final cDeskX = dsk.deskW / 2, cDeskY = dsk.deskH / 2;
+            final cDetX = dsk.detW / 2, cDetY = dsk.detH / 2;
+            final sX = imageWidth / dsk.detW, sY = imageHeight / dsk.detH;
+            Offset unmap(Offset p) {
+              final dx = p.dx + dsk.minX - cDeskX,
+                  dy = p.dy + dsk.minY - cDeskY;
+              return Offset(
+                (ct * dx - st * dy + cDetX) * sX,
+                (st * dx + ct * dy + cDetY) * sY,
+              );
+            }
+
+            onStatus?.call('מתאים רשת-כבישים מול OSM (בלי AI)...');
+            classical = await _classicalMatch(
+              junctionPx: dsk.junctions,
+              scanRound: dsk.rounds,
+              roadPointsScan: dsk.roads,
+              areaHint: effectiveHint,
+              unmapPixel: unmap,
+            );
+          }
+        }
         if (classical != null && classical.length >= 4) {
-          // סינון-שיורי: במצב north-up המפה עשויה להיות סכמטית (עיוות
-          // אמיתי) — סף רחב (90מ') שלא יזרוק עוגנים תקינים; אחרת צמוד
-          // (40מ') כי מה שסוטה הוא החלפת-נקודות.
+          // סינון-שיורי רחב (90מ') — מפה סכמטית עשויה לסטות אמיתית; מה
+          // שסוטה קיצונית = החלפת-נקודות, נזרק.
           _applyGeometricConsistency(classical, imageWidth, imageHeight,
-              maxResidualMeters: northUp ? 90 : 40);
+              maxResidualMeters: 90);
           final kept = classical.where((s) => s.verified != false).toList();
           if (kept.length >= 4) return kept;
         }
@@ -939,12 +973,73 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
 
   /// מתאים את צמתי-הסריקה לצמתי-OSM וקטוריים של האזור. מחזיר עוגנים
   /// מאומתים (world = קואורדינטת-OSM מדויקת) או null כשההתאמה לא אמינה.
+  /// תוצאת deskew: צמתים/כבישים בפריים המיושר-החתוך + פרמטרי-המיפוי חזרה
+  /// לקואורדינטות התמונה המקורית (ברי-שליחה בין isolates — בלי closure).
+  static ({
+    List<Point<double>> junctions,
+    List<bool> rounds,
+    List<Point<double>> roads,
+    double skew,
+    int minX,
+    int minY,
+    int deskW,
+    int deskH,
+    int detW,
+    int detH,
+  })? _deskewDetectSync(img.Image detImg) {
+    final skew = RoadJunctionDetector.estimateSkewDeg(detImg);
+    if (skew.abs() < 2) return null; // כבר צירי — אין צורך ב-deskew
+    final desk = img.copyRotate(detImg,
+        angle: skew, interpolation: img.Interpolation.linear);
+    // חיתוך לתוכן (מחריג מילוי-סיבוב לבן *וגם* שחור).
+    var minX = desk.width, minY = desk.height, maxX = 0, maxY = 0;
+    for (var y = 0; y < desk.height; y += 2) {
+      for (var x = 0; x < desk.width; x += 2) {
+        final p = desk.getPixel(x, y);
+        if ((p.r < 245 || p.g < 245 || p.b < 245) &&
+            (p.r > 18 || p.g > 18 || p.b > 18)) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX - minX < 60 || maxY - minY < 60) return null;
+    final cropped = img.copyCrop(desk,
+        x: minX, y: minY, width: maxX - minX, height: maxY - minY);
+    final det = RoadJunctionDetector.detectFull(cropped);
+    final junctions = <Point<double>>[];
+    final rounds = <bool>[];
+    for (final f in det.features) {
+      if (f.kind == MapFeatureKind.junction ||
+          f.kind == MapFeatureKind.roundabout) {
+        junctions.add(f.pos);
+        rounds.add(f.kind == MapFeatureKind.roundabout);
+      }
+    }
+    return (
+      junctions: junctions,
+      rounds: rounds,
+      roads: det.roadPoints,
+      skew: skew,
+      minX: minX,
+      minY: minY,
+      deskW: desk.width,
+      deskH: desk.height,
+      detW: detImg.width,
+      detH: detImg.height,
+    );
+  }
+
+  /// [unmapPixel]: כשהצמתים ניתנו בפריים **מיושר** (deskew), הפונקציה
+  /// ממפה כל פיקסל-עוגן חזרה לקואורדינטות התמונה המקורית (המסובבת).
   Future<List<GeminiAnchorSuggestion>?> _classicalMatch({
     required List<Point<double>> junctionPx,
     required List<bool> scanRound,
     required List<Point<double>> roadPointsScan,
     required String areaHint,
-    bool northUp = false,
+    Offset Function(Offset)? unmapPixel,
   }) async {
     // bbox צמוד ליישוב — ריפוד רחב בולע יישוב שכן עם רשת-כבישים דומה
     // וגורם להתאמות-שווא (נצפה: נקודות נחתו בחיספין במקום בנוב).
@@ -961,27 +1056,17 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     ));
     if (osm.junctions.length < 4) return null;
 
-    // [northUp]: רישום נעול-סיבוב (θ=0) — מהיר ומדויק למפה מיושרת-צפון.
-    // אחרת: **סריקת-זווית** (registerSweep) — סורק θ, נועל סיבוב בכל אחת,
-    // ומדרג לפי חפיפת-כבישים. מוצא את זווית-המפה לבד ומבטל את אמביגואיית-
-    // ה-RANSAC המלא (north-up הוא המקרה θ=0).
-    final res = northUp
-        ? await AnchorMatcher.registerNorthUpInIsolate(
-            scanPx: junctionPx,
-            refGeo: osm.junctions,
-            scanRound: scanRound,
-            refRound: osm.isRoundabout,
-            scanRoad: roadPointsScan.isEmpty ? null : roadPointsScan,
-            refRoad: osm.roadPoints,
-          )
-        : await AnchorMatcher.registerSweepInIsolate(
-            scanPx: junctionPx,
-            refGeo: osm.junctions,
-            scanRound: scanRound,
-            refRound: osm.isRoundabout,
-            scanRoad: roadPointsScan.isEmpty ? null : roadPointsScan,
-            refRoad: osm.roadPoints,
-          );
+    // רישום נעול-סיבוב (θ=0). מיושר-צפון → ישירות; מפה מסובבת → הצמתים
+    // כבר יושרו (deskew) לפני הקריאה, כך שכאן זה תמיד north-up. הסיבוב
+    // מוחזר לקואורדינטות-המקור ע"י [unmapPixel].
+    final res = await AnchorMatcher.registerNorthUpInIsolate(
+      scanPx: junctionPx,
+      refGeo: osm.junctions,
+      scanRound: scanRound,
+      refRound: osm.isRoundabout,
+      scanRoad: roadPointsScan.isEmpty ? null : roadPointsScan,
+      refRoad: osm.roadPoints,
+    );
     // דורשים יחס-inliers סביר — מגן מפני התאמה-חלקית מקרית.
     final minReq = max(4, (junctionPx.length * 0.35).round());
     if (res == null || res.inliers < minReq) return null;
@@ -989,7 +1074,9 @@ ${(areaHint != null && areaHint.trim().isNotEmpty) ? '\nהמשתמש מסר רמ
     return [
       for (final m in res.matches)
         GeminiAnchorSuggestion(
-          pixel: Offset(m.pixel.x, m.pixel.y),
+          pixel: unmapPixel != null
+              ? unmapPixel(Offset(m.pixel.x, m.pixel.y))
+              : Offset(m.pixel.x, m.pixel.y),
           world: m.world,
           name: m.isRoundabout ? 'כיכר' : 'צומת כבישים',
           confidence: 1,
