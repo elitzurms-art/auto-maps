@@ -83,6 +83,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   img.Image? _scanImage; // התמונה המפוענחת (לחיתוך חלונות-OCR)
   // צלבי-רשת שנקראו: פיקסל + קואורדינטה מוקרנת (מטרים) + CRS.
   final List<({Offset pixel, double e, double n, String crs})> _gridTicks = [];
+  LatLng? _mapCenteredOn; // הנקודה שעליה מפת-הווידוא כבר מורכזה
 
   /// סקאלה מ-pixels אמיתיים ל-display
   double get _displayScale {
@@ -1373,6 +1374,18 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
 
   Widget _buildMapView() {
     final sources = _refMap.availableSources();
+    // מרכוז-אקטיבי: ה-MapController ה"דביק" זוכר מרכז ישן ומתעלם מ-
+    // initialCenter ברי-בנייה. מזיזים ידנית לנקודה האחרונה כשהיא השתנתה.
+    final target = _lastWorldPoint;
+    if (target != null && target != _mapCenteredOn) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        try {
+          _mapController.move(target, 16);
+          _mapCenteredOn = target;
+        } catch (_) {}
+      });
+    }
     return Stack(
       children: [
         FlutterMap(
