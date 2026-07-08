@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
@@ -98,6 +99,18 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   // מפה
   final MapController _mapController = MapController();
 
+  // ---- פקדי-מפה נוספים (סרגל-קנה-מידה/חץ-צפון/קריאת-קואורדינטה/רשת) ----
+  // שירות ההקרנה — לשימוש חוזר בהמרות WGS84↔מוקרן.
+  final WorldFileParserService _projSvc = WorldFileParserService();
+  // פורמט קריאת-הקואורדינטה: 0=ITM, 1=UTM 36N, 2=lat/lon.
+  int _coordFormat = 0;
+  // מרכז-המפה הנוכחי לקריאה (מתעדכן בזמן הזזה).
+  LatLng? _cursorCenter;
+  // סוג רשת-הקואורדינטות המצוירת: null=כבוי, 'itm', 'utm'.
+  String? _gridType;
+  // מנוי לאירועי-המפה (הזזה) — מבוטל ב-dispose.
+  StreamSubscription? _mapEventSub;
+
   // תוצאה
   WorldFileResult? _result;
 
@@ -121,13 +134,126 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     OcrService.available().then((ok) {
       if (mounted) setState(() => _ocrAvailable = ok);
     });
+    // מעקב אחר הזזת-המפה — מעדכן את קריאת-הקואורדינטה ואת רשת-הקואורדינטות.
+    _mapEventSub = _mapController.mapEventStream.listen((_) {
+      if (!mounted) return;
+      setState(() => _cursorCenter = _mapController.camera.center);
+    });
   }
 
   @override
   void dispose() {
     _refMap.removeListener(_onRefMapChanged);
+    _mapEventSub?.cancel();
     _transformController.dispose();
     super.dispose();
+  }
+
+  // ---- עזרי פקדי-המפה ----
+
+  /// טקסט קריאת-הקואורדינטה של מרכז-המפה, לפי הפורמט הנבחר.
+  String _coordReadout(LatLng ll) {
+    switch (_coordFormat) {
+      case 0: // ITM
+        final p = _projSvc.wgs84ToProjected(ll, 'EPSG:2039');
+        return 'ITM  E ${p.x.round()}  N ${p.y.round()}';
+      case 1: // UTM 36N
+        final p = _projSvc.wgs84ToProjected(ll, 'EPSG:32636');
+        return 'UTM36N  E ${p.x.round()}  N ${p.y.round()}';
+      default: // lat/lon
+        return '${ll.latitude.toStringAsFixed(5)}, '
+            '${ll.longitude.toStringAsFixed(5)}';
+    }
+  }
+
+  /// מרווח-הרשת (מטרים) לפי רמת-הזום — קווים צפופים בזום גבוה.
+  double _gridInterval(double zoom) {
+    if (zoom >= 15) return 500;
+    if (zoom >= 13) return 1000;
+    return 2000;
+  }
+
+  /// בונה את קווי-רשת-הקואורדינטות (ITM/UTM) בתחום-הנראה של המפה.
+  /// כל קו נדגם בכמה נקודות ומומר חזרה ל-WGS84 כדי לעקוב אחר עיוות-ההקרנה.
+  List<Polyline> _buildGridLines() {
+    final type = _gridType;
+    if (type == null) return const [];
+    final crs = type == 'utm' ? 'EPSG:32636' : 'EPSG:2039';
+    final MapCamera cam;
+    try {
+      cam = _mapController.camera;
+    } catch (_) {
+      return const [];
+    }
+    final bounds = cam.visibleBounds;
+    final sw = _projSvc.wgs84ToProjected(bounds.southWest, crs);
+    final ne = _projSvc.wgs84ToProjected(bounds.northEast, crs);
+    // גבולות-מוקרנים (מרחיבים מעט למקרה של סיבוב-הקרנה קל).
+    final minE = min(sw.x, ne.x);
+    final maxE = max(sw.x, ne.x);
+    final minN = min(sw.y, ne.y);
+    final maxN = max(sw.y, ne.y);
+    final step = _gridInterval(cam.zoom);
+    // הגנה מפני יותר מדי קווים (למשל תחום ענק בזום נמוך).
+    if ((maxE - minE) / step > 200 || (maxN - minN) / step > 200) {
+      return const [];
+    }
+    final color = Colors.orange.withValues(alpha: 0.5);
+    final lines = <Polyline>[];
+    const samples = 8; // דגימות לאורך כל קו — לקירוב עקומת-ההקרנה.
+
+    // קווים אנכיים (easting קבוע), נדגמים לאורך ה-northing.
+    final firstE = (minE / step).ceil() * step;
+    for (double e = firstE; e <= maxE; e += step) {
+      final pts = <LatLng>[];
+      for (int i = 0; i <= samples; i++) {
+        final n = minN + (maxN - minN) * i / samples;
+        pts.add(_projSvc.projectToWgs84(e, n, crs));
+      }
+      lines.add(Polyline(points: pts, color: color, strokeWidth: 1));
+    }
+    // קווים אופקיים (northing קבוע), נדגמים לאורך ה-easting.
+    final firstN = (minN / step).ceil() * step;
+    for (double n = firstN; n <= maxN; n += step) {
+      final pts = <LatLng>[];
+      for (int i = 0; i <= samples; i++) {
+        final e = minE + (maxE - minE) * i / samples;
+        pts.add(_projSvc.projectToWgs84(e, n, crs));
+      }
+      lines.add(Polyline(points: pts, color: color, strokeWidth: 1));
+    }
+    return lines;
+  }
+
+  /// חישוב-מקורב של אורך סרגל-קנה-המידה: מספר-עגול של מטרים ורוחבו בפיקסלים.
+  ({double widthPx, String label}) _scaleBarMetrics() {
+    final MapCamera cam;
+    try {
+      cam = _mapController.camera;
+    } catch (_) {
+      return (widthPx: 0, label: '');
+    }
+    // מטרים-לפיקסל ב-web-mercator בקו-הרוחב הנוכחי.
+    final lat = cam.center.latitude;
+    final metersPerPixel =
+        156543.03392 * cos(lat * pi / 180) / pow(2, cam.zoom);
+    const maxBarPx = 120.0; // רוחב-מטרה מקסימלי לסרגל.
+    final maxMeters = metersPerPixel * maxBarPx;
+    // בחירת מספר-עגול "נחמד" (1/2/5 × עשרוני) שאינו עולה על maxMeters.
+    final pow10 = pow(10, (log(maxMeters) / ln10).floor()).toDouble();
+    double nice;
+    if (maxMeters / pow10 >= 5) {
+      nice = 5 * pow10;
+    } else if (maxMeters / pow10 >= 2) {
+      nice = 2 * pow10;
+    } else {
+      nice = pow10;
+    }
+    final widthPx = nice / metersPerPixel;
+    final label = nice >= 1000
+        ? '${(nice / 1000).toStringAsFixed(nice % 1000 == 0 ? 0 : 1)} ק"מ'
+        : '${nice.round()} מ\'';
+    return (widthPx: widthPx, label: label);
   }
 
   void _onRefMapChanged() {
@@ -1396,6 +1522,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           ),
           children: [
             ..._refMap.buildActiveTileLayers(),
+            // רשת-קואורדינטות (ITM/UTM) — נצבעת מתחת למרקרים
+            if (_gridType != null)
+              PolylineLayer(polylines: _buildGridLines()),
             // מרקרים ירוקים ממוספרים של נקודות שנדקרו
             MarkerLayer(
               markers: _points
@@ -1490,10 +1619,159 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
               child: Center(child: CircularProgressIndicator()),
             ),
           ),
+        // חץ-צפון + כפתור-רשת (המפות מיושרות-צפון) — פינה שמאלית-עליונה
+        Positioned(
+          top: 8,
+          left: 8,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // חץ-צפון סטטי
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.85),
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black26, blurRadius: 2),
+                  ],
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.navigation, size: 18, color: Colors.red),
+                    Text(
+                      'צ',
+                      style: TextStyle(
+                        fontSize: 9,
+                        height: 1,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey[800],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 6),
+              // בורר רשת-הקואורדינטות: כבוי / ITM / UTM
+              Material(
+                elevation: 2,
+                borderRadius: BorderRadius.circular(8),
+                color: _gridType != null ? Colors.orange[50] : Colors.white,
+                child: PopupMenuButton<String>(
+                  tooltip: 'רשת קואורדינטות',
+                  icon: Icon(
+                    Icons.grid_on,
+                    size: 20,
+                    color: _gridType != null
+                        ? Colors.orange[800]
+                        : Colors.grey[700],
+                  ),
+                  onSelected: (v) => setState(
+                    () => _gridType = v == 'off' ? null : v,
+                  ),
+                  itemBuilder: (ctx) => [
+                    _gridMenuItem('off', 'ללא רשת', _gridType == null),
+                    _gridMenuItem('itm', 'רשת ITM', _gridType == 'itm'),
+                    _gridMenuItem('utm', 'רשת UTM 36N', _gridType == 'utm'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        // סרגל קנה-מידה — פינה שמאלית-תחתית
+        Positioned(
+          left: 12,
+          bottom: 40,
+          child: IgnorePointer(child: _buildScaleBar()),
+        ),
+        // קריאת-קואורדינטה של מרכז-המפה — מרכז-תחתון; הקשה מחליפה פורמט
+        Positioned(
+          bottom: 12,
+          left: 0,
+          right: 0,
+          child: Center(
+            child: Material(
+              elevation: 2,
+              borderRadius: BorderRadius.circular(6),
+              color: Colors.black.withValues(alpha: 0.6),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(6),
+                onTap: () => setState(() => _coordFormat = (_coordFormat + 1) % 3),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
+                  child: Text(
+                    _coordReadout(_cursorCenter ?? _mapController.camera.center),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontFeatures: [ui.FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
         // צלב במרכז
         const Positioned.fill(
           child: IgnorePointer(
             child: Center(child: _Crosshair(color: Colors.blue)),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// פריט בבורר רשת-הקואורדינטות עם סימון-בחירה.
+  PopupMenuItem<String> _gridMenuItem(String value, String label, bool sel) {
+    return PopupMenuItem<String>(
+      value: value,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (sel)
+            const Icon(Icons.check, size: 16, color: Colors.orange)
+          else
+            const SizedBox(width: 16),
+          const SizedBox(width: 6),
+          Text(label),
+        ],
+      ),
+    );
+  }
+
+  /// סרגל קנה-מידה מותאם (flutter_map 6.2.1 חסר Scalebar מובנה).
+  Widget _buildScaleBar() {
+    final m = _scaleBarMetrics();
+    if (m.widthPx <= 0) return const SizedBox.shrink();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+          color: Colors.white.withValues(alpha: 0.7),
+          child: Text(
+            m.label,
+            style: const TextStyle(fontSize: 11, color: Colors.black87),
+          ),
+        ),
+        Container(
+          width: m.widthPx,
+          height: 6,
+          decoration: BoxDecoration(
+            border: Border(
+              left: BorderSide(color: Colors.black87, width: 2),
+              right: BorderSide(color: Colors.black87, width: 2),
+              bottom: BorderSide(color: Colors.black87, width: 2),
+            ),
+            color: Colors.white.withValues(alpha: 0.4),
           ),
         ),
       ],

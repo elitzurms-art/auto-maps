@@ -160,6 +160,19 @@ class WorldFileParserService {
     return LatLng(result.y, result.x);
   }
 
+  /// המרה הפוכה — WGS84 → קואורדינטה מוקרנת (ITM/UTM וכו').
+  /// מחזיר easting/northing במטרים. ל-EPSG:4326 מחזיר lon/lat כפי שהם.
+  ({double x, double y}) wgs84ToProjected(LatLng ll, String crs) {
+    if (crs == 'EPSG:4326') {
+      return (x: ll.longitude, y: ll.latitude);
+    }
+    final src = proj4.Projection.parse(_wgs84Proj);
+    final dst = proj4.Projection.parse(_projDefinition(crs));
+    final point = proj4.Point(x: ll.longitude, y: ll.latitude);
+    final result = src.transform(dst, point);
+    return (x: result.x, y: result.y);
+  }
+
   String _projDefinition(String crs) {
     switch (crs) {
       case 'EPSG:2039':
