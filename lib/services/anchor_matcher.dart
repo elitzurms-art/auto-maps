@@ -672,6 +672,7 @@ class AnchorMatcher {
     List<int>? refType,
     List<Point<double>>? scanRoad,
     List<LatLng>? refRoad,
+    double? scalePrior,
   }) {
     return Isolate.run(() => registerNorthUp(
           scanPx: scanPx,
@@ -682,6 +683,7 @@ class AnchorMatcher {
           refType: refType,
           scanRoad: scanRoad,
           refRoad: refRoad,
+          scalePrior: scalePrior,
         ));
   }
 
@@ -694,6 +696,7 @@ class AnchorMatcher {
     List<int>? refType,
     List<Point<double>>? scanRoad,
     List<LatLng>? refRoad,
+    double? scalePrior,
     int minInliers = 4,
     int iterations = 200000,
     int seed = 7,
@@ -714,7 +717,12 @@ class AnchorMatcher {
 
     final scanSpan = _span(scan), refSpan = _span(ref);
     if (scanSpan < 1 || refSpan < 1) return null;
-    final expScale = refSpan / scanSpan;
+    // [scalePrior] (מוטת-ההיקף OSM/סריקה) — אמין יותר ממוטת-הצמתים; כשנתון,
+    // חלון-סקלה **צמוד** (±40%) שדוחה פתרון מוגדל/מכווץ (המקור לכשל
+    // מרום גולן: קנה-מידה כפול). אחרת expScale ממוטת-הצמתים וחלון רחב.
+    final expScale = scalePrior ?? (refSpan / scanSpan);
+    final scaleLo = scalePrior != null ? expScale * 0.7 : expScale * 0.4;
+    final scaleHi = scalePrior != null ? expScale * 1.4 : expScale * 2.5;
     // סף-inlier בפיקסלי-סריקה × קנה-מידה (כמו בשאר המַתאם).
     final thrPx = scanSpan * 0.02;
 
@@ -734,7 +742,7 @@ class AnchorMatcher {
       final cosang = (dz.re * dw.re + dz.im * dw.im) / (dz.abs * dw.abs);
       if (cosang < 0.985) continue; // < ~10°
       final s = dw.abs / dz.abs;
-      if (s < expScale * 0.4 || s > expScale * 2.5) continue;
+      if (s < scaleLo || s > scaleHi) continue;
       final b = ref[j] - scan[i] * _C(s, 0);
       final thr2 = pow(thrPx * s, 2).toDouble();
       var inl = 0;
