@@ -844,16 +844,22 @@ class AnchorMatcher {
     required List<LatLng> refGeo,
     List<bool>? scanRound,
     List<bool>? refRound,
+    List<int>? scanType,
+    List<int>? refType,
     List<Point<double>>? scanRoad,
     List<LatLng>? refRoad,
+    double? maxRotationDeg,
   }) {
     return Isolate.run(() => registerSweep(
           scanPx: scanPx,
           refGeo: refGeo,
           scanRound: scanRound,
           refRound: refRound,
+          scanType: scanType,
+          refType: refType,
           scanRoad: scanRoad,
           refRoad: refRoad,
+          maxRotationDeg: maxRotationDeg,
         ));
   }
 
@@ -862,8 +868,11 @@ class AnchorMatcher {
     required List<LatLng> refGeo,
     List<bool>? scanRound,
     List<bool>? refRound,
+    List<int>? scanType,
+    List<int>? refType,
     List<Point<double>>? scanRoad,
     List<LatLng>? refRoad,
+    double? maxRotationDeg,
     int minInliers = 4,
     int seed = 7,
   }) {
@@ -926,11 +935,12 @@ class AnchorMatcher {
         final b = ref[j] - a * scan[i];
         final thr2 = pow(thrPx * s, 2).toDouble();
         var inl = 0;
-        for (final z in scan) {
-          final w = a * z + b;
+        for (var si = 0; si < scan.length; si++) {
+          final w = a * scan[si] + b;
           var best = double.infinity;
-          for (final r in ref) {
-            final d2 = (w - r).abs2;
+          for (var ri = 0; ri < ref.length; ri++) {
+            if (scanType != null && scanType[si] != refType![ri]) continue;
+            final d2 = (w - ref[ri]).abs2;
             if (d2 < best) best = d2;
           }
           if (best <= thr2) inl++;
@@ -947,7 +957,8 @@ class AnchorMatcher {
       for (var round = 0; round < 4; round++) {
         final s0 = a.abs;
         final thr2 = pow(thrPx * s0, 2).toDouble();
-        final ps = _correspondences(scan, ref, a, b, thr2, scanRound, refRound);
+        final ps = _correspondences(scan, ref, a, b, thr2, scanRound, refRound,
+            scanTy: scanType, refTy: refType);
         if (ps.length < minInliers) break;
         // u_i = scan·rot ; פותרים w ≈ s·u + b.
         var uc = const _C(0, 0), wc = const _C(0, 0);
@@ -976,7 +987,8 @@ class AnchorMatcher {
       // עידון עלול להבריח את הסקלה מחוץ לחלון — פוסלים.
       if (a.abs < minScale || a.abs > maxScale) return null;
       final thr2f = pow(thrPx * a.abs, 2).toDouble();
-      final ps = _correspondences(scan, ref, a, b, thr2f, scanRound, refRound);
+      final ps = _correspondences(scan, ref, a, b, thr2f, scanRound, refRound,
+          scanTy: scanType, refTy: refType);
       final roadFit =
           useRoad ? _roadFit(scanRoadC, refRoadC, a, b) : double.nan;
       return (a: a, b: b, inliers: ps.length, roadFit: roadFit);
@@ -998,8 +1010,13 @@ class AnchorMatcher {
       }
     }
 
-    // סריקה גסה (כל 10°) ואז עידון (±9° בצעדי 1°) סביב הטוב.
-    for (var deg = 0; deg < 360; deg += 10) {
+    // טווח-הסריקה: מלא (0–359) לזווית לא-ידועה, או **צמוד** (±maxRotationDeg
+    // סביב 0) ל"בערך-צפון" — תופס סיבוב-קטן (מצפן ~10-15°) בלי אמביגואיית-
+    // ה-180° של רשת. עידון (±9°) סביב הטוב בצעדי 1°.
+    final coarseStep = maxRotationDeg != null ? 2 : 10;
+    final coarseFrom = maxRotationDeg != null ? -maxRotationDeg.round() : 0;
+    final coarseTo = maxRotationDeg != null ? maxRotationDeg.round() : 350;
+    for (var deg = coarseFrom; deg <= coarseTo; deg += coarseStep) {
       if (sweepDebug) {
         final r = tryAngle(deg.toDouble());
         _sweepLog.add((deg, r?.inliers ?? 0, r?.roadFit ?? double.nan));
@@ -1013,16 +1030,18 @@ class AnchorMatcher {
     }
     if (best == null) return null;
 
-    // שער-איכות: אם אין זווית עם חפיפת-כבישים טובה (מפה שהגלאי לא מזהה
-    // היטב תחת סיבוב — אין שיא), עדיף null → נפילה-חזרה ל-AI מלהציג
-    // רישום מסובב שגוי.
-    if (useRoad && best!.roadFit > 24) return null;
+    // שער-איכות: רק בסריקה מלאה (זווית לא-ידועה) — מפה שהגלאי לא מזהה
+    // היטב תחת סיבוב אין לה שיא, עדיף null → נפילה ל-AI. ב"בערך-צפון"
+    // (טווח צמוד) סומכים על הסיבוב-הקטן, כמו ב-registerNorthUp.
+    if (maxRotationDeg == null && useRoad && best!.roadFit > 24) return null;
 
     return buildResult(
       scanPx: scanPx,
       refGeo: refGeo,
       scanRound: scanRound,
       refRound: refRound,
+      scanTy: scanType,
+      refTy: refType,
       aRe: best!.a.re,
       aIm: best!.a.im,
       bRe: best!.b.re,
