@@ -87,6 +87,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   // טקסט-שלב בזמן OCR של זיהוי-הרשת (הפס עצמו אנימציה).
   String? _progressText;
   bool _autoTried = false; // ניסיון-אוטומטי בטעינה — פעם אחת
+  bool _autoCancelled = false; // המשתמש דילג על הזיהוי-האוטומטי
   img.Image? _scanImage; // התמונה המפוענחת (לחיתוך חלונות-OCR)
   // צלבי-רשת שנקראו: פיקסל + קואורדינטה מוקרנת (מטרים) + CRS.
   final List<({Offset pixel, double e, double n, String crs})> _gridTicks = [];
@@ -1309,6 +1310,17 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                             child: LinearProgressIndicator(minHeight: 8),
                           ),
                         ),
+                        const SizedBox(height: 8),
+                        // דלג — למפות בלי רשת-קואורדינטות (בזבוז זמן).
+                        TextButton.icon(
+                          onPressed: () => setState(() {
+                            _autoCancelled = true;
+                            _gridBusy = false;
+                            _progressText = null;
+                          }),
+                          icon: const Icon(Icons.skip_next, size: 18),
+                          label: const Text('דלג — נעץ ידנית'),
+                        ),
                       ],
                     ),
                   ),
@@ -1640,6 +1652,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   /// והמשתמש יכול להקיש ידנית.
   Future<void> _autoDetectGrid({bool silent = false}) async {
     if (_gridBusy) return;
+    _autoCancelled = false;
     setState(() {
       _gridBusy = true;
       _progressText = 'מתחיל זיהוי-רשת-קואורדינטות…';
@@ -1651,7 +1664,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         ticks = await GridCoordService.autoDetectTicks(
           scan,
           onProgress: (status, frac) {
-            if (mounted) setState(() => _progressText = status);
+            if (mounted && !_autoCancelled) {
+              setState(() => _progressText = status);
+            }
           },
         );
       }
@@ -1661,6 +1676,19 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       _gridBusy = false;
       _progressText = null;
     });
+    // המשתמש דילג — לא דורסים עבודה ידנית. אם בכל-זאת נמצאה רשת ואין
+    // עדיין נקודות, מציעים בעדינות דרך snackbar (לחיצה על ⊞ תריץ שוב).
+    if (_autoCancelled) {
+      if (ticks.length >= 2 && _points.isEmpty) {
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(const SnackBar(
+            content: Text('זוהתה רשת-קואורדינטות ברקע — לחץ ⊞ להצגתה.'),
+            duration: Duration(seconds: 4),
+          ));
+      }
+      return;
+    }
     if (ticks.length < 2) {
       // בטעינה-אוטומטית (silent) — בלי הודעה מפריעה; פשוט נשארים במצב-ידני.
       if (!silent) {
