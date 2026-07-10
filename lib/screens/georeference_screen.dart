@@ -113,6 +113,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   String? _gridType;
   // שכבת-על "כבישים ותוויות" (Esri Reference) מעל מפת-הבסיס.
   bool _roadsOverlay = false;
+  // תצוגה-מקדימה מרחפת: שקיפות-השילוב ורקע-לוויין.
+  double _previewOpacity = 0.6;
+  bool _previewSatellite = false;
   // גובה (מטרים) במרכז-המפה — נשלף מ-API בהשהיה; null עד שנטען.
   double? _cursorElevation;
   Timer? _elevDebounce;
@@ -141,13 +144,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     // גילוי אוטומטי של קבצי-מפה בתיקיית-הייחוס המשתמעת (reference_maps).
     _refMap.loadDefaultFolder();
     // זמינות-OCR (Tesseract) — קובעת אם להציע את מצב רשת-הקואורדינטות.
-    OcrService.available().then((ok) async {
+    OcrService.available().then((ok) {
       if (mounted) setState(() => _ocrAvailable = ok);
-      try {
-        File('${Directory.systemTemp.path}/auto_maps_grid.log').writeAsStringSync(
-            'init: ocrAvailable=$ok tess=${await OcrService.tesseractPath()}\n',
-            mode: FileMode.append);
-      } catch (_) {}
     });
     // רמז-מיקום משם-הקובץ — כדי שהדקירה הראשונה במצב-ידני תיפתח באזור הנכון.
     _resolveFilenameHint();
@@ -1299,35 +1297,96 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   }
 
   Widget _buildPreviewOverlay() {
+    final center = LatLng(
+      (_result!.southWest.latitude + _result!.northEast.latitude) / 2,
+      (_result!.southWest.longitude + _result!.northEast.longitude) / 2,
+    );
     return Positioned.fill(
       child: Container(
-        color: Colors.black26,
+        color: Colors.black54,
         child: Center(
-          child: SizedBox(
-            height: 200,
-            width: double.infinity,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: FlutterMap(
-                  options: MapOptions(
-                    initialCenter: LatLng(
-                      (_result!.southWest.latitude +
-                              _result!.northEast.latitude) /
-                          2,
-                      (_result!.southWest.longitude +
-                              _result!.northEast.longitude) /
-                          2,
-                    ),
-                    initialZoom: 13,
-                  ),
+          child: StatefulBuilder(
+            builder: (ctx, setLocal) => FractionallySizedBox(
+              widthFactor: 0.92,
+              heightFactor: 0.82,
+              child: Card(
+                clipBehavior: Clip.antiAlias,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Column(
                   children: [
-                    ..._refMap.buildActiveTileLayers(),
-                    OverlayImageLayer(
-                      overlayImages: [_rotatedOverlay(_result!, 0.7)],
+                    // כותרת + סגירה
+                    Container(
+                      color: Colors.blueGrey[50],
+                      padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.preview, size: 20),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text('תצוגה מקדימה — בדוק את היישור מול המפה',
+                                style:
+                                    TextStyle(fontWeight: FontWeight.bold)),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close),
+                            tooltip: 'סגור (חזרה לעריכה)',
+                            onPressed: () => setState(() => _result = null),
+                          ),
+                        ],
+                      ),
                     ),
-                    _mapAttribution(),
+                    // המפה עם שילוב-שקיפות
+                    Expanded(
+                      child: FlutterMap(
+                        options: MapOptions(
+                          initialCenter: center,
+                          initialZoom: 15,
+                        ),
+                        children: [
+                          ...(_previewSatellite
+                              ? [SatelliteOnlineSource.baseTile]
+                              : _refMap.buildActiveTileLayers()),
+                          if (_previewSatellite && _roadsOverlay)
+                            ...esriRoadOverlays(),
+                          OverlayImageLayer(
+                            overlayImages: [
+                              _rotatedOverlay(_result!, _previewOpacity),
+                            ],
+                          ),
+                          _mapAttribution(),
+                        ],
+                      ),
+                    ),
+                    // פקדים: רקע מפה/לוויין + סליידר-שקיפות
+                    Container(
+                      color: Colors.blueGrey[50],
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      child: Row(
+                        children: [
+                          ToggleButtons(
+                            isSelected: [!_previewSatellite, _previewSatellite],
+                            onPressed: (i) =>
+                                setLocal(() => _previewSatellite = i == 1),
+                            borderRadius: BorderRadius.circular(8),
+                            constraints: const BoxConstraints(
+                                minHeight: 32, minWidth: 56),
+                            children: const [Text('מפה'), Text('לוויין')],
+                          ),
+                          const SizedBox(width: 12),
+                          const Text('שקיפות'),
+                          Expanded(
+                            child: Slider(
+                              value: _previewOpacity,
+                              onChanged: (v) =>
+                                  setLocal(() => _previewOpacity = v),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -1557,20 +1616,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     if (_gridBusy) return;
     setState(() => _gridBusy = true);
     var ticks = const <({Offset pixel, double e, double n, String crs})>[];
-    var dbg = '';
     try {
       final scan = await _ensureScanImage();
-      dbg = 'scan=${scan == null ? "null" : "${scan.width}x${scan.height}"} '
-          'ocr=${await OcrService.available()} '
-          'tess=${await OcrService.tesseractPath()}';
       if (scan != null) ticks = await GridCoordService.autoDetectTicks(scan);
-      dbg += ' ticks=${ticks.length}';
-    } catch (e, st) {
-      dbg += ' EXC=$e | ${st.toString().split('\n').take(2).join(" ")}';
-    }
-    try {
-      File('${Directory.systemTemp.path}/auto_maps_grid.log')
-          .writeAsStringSync('$dbg\n', mode: FileMode.append);
     } catch (_) {}
     if (!mounted) return;
     setState(() => _gridBusy = false);
