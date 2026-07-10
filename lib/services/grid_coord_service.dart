@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:ui' show Offset;
 
 import 'package:image/image.dart' as img;
@@ -98,15 +99,20 @@ class GridCoordService {
     void Function(String status, double fraction)? onProgress,
   }) async {
     const scale = 3;
-    onProgress?.call('מגדיל את התמונה ×3…', 0.12);
-    final up = img.copyResize(src,
-        width: src.width * scale, interpolation: img.Interpolation.cubic);
-    final uw = up.width;
     final dir = Directory.systemTemp;
     final nPath = '${dir.path}/_amauto_n.png';
     final rPath = '${dir.path}/_amauto_r.png';
-    File(nPath).writeAsBytesSync(img.encodePng(up));
-    File(rPath).writeAsBytesSync(img.encodePng(img.copyRotate(up, angle: -90)));
+    // ⚠️ ההגדלה (×3 → ~5760px) + קידוד-ה-PNG הם עבודה **סינכרונית כבדה**
+    // (~שניות) — ב-Isolate כדי לא לתקוע את ה-UI (אחרת פס-ההתקדמות קופא).
+    onProgress?.call('מגדיל את התמונה ×3…', 0.15);
+    final uw = await Isolate.run(() {
+      final up = img.copyResize(src,
+          width: src.width * scale, interpolation: img.Interpolation.cubic);
+      File(nPath).writeAsBytesSync(img.encodePng(up));
+      File(rPath)
+          .writeAsBytesSync(img.encodePng(img.copyRotate(up, angle: -90)));
+      return up.width;
+    });
 
     int? roundVal(String t) {
       final d = t.replaceAll(',', '').trim();
