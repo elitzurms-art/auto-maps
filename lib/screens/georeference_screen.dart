@@ -1739,7 +1739,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             });
           },
         ).timeout(
-          Duration(seconds: silent ? 45 : 90),
+          // ה-OCR (×3 הגדלה + Tesseract) איטי מטבעו על תמונה גדולה — דורש
+          // דקות, לא שניות. גבול נדיב (5 דק') רק כרשת-ביטחון מפני תקיעה
+          // אמיתית; לא חותך ריצה תקינה.
+          const Duration(minutes: 5),
           onTimeout: () =>
               const <({Offset pixel, double e, double n, String crs})>[],
         );
