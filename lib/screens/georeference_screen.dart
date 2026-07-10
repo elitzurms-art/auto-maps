@@ -92,6 +92,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   // במקביל, וכשנמצאת רשת מוצג/מוצע בלי שבזבזנו זמן על מפות בלי-רשת.
   bool _autoRunning = false;
   String? _autoStatus;
+  bool _autoClassicalRunning = false; // מנוע-הכבישים ברקע (במקביל לרשת)
+  bool _autoResultShown = false; // תוצאה אוטומטית כבר הוצעה (מונע כפילות)
+  String? _hintName; // שם-האזור שנגזר משם-הקובץ (לרמז המסלול-הקלאסי)
   img.Image? _scanImage; // התמונה המפוענחת (לחיתוך חלונות-OCR)
   // צלבי-רשת שנקראו: פיקסל + קואורדינטה מוקרנת (מטרים) + CRS.
   final List<({Offset pixel, double e, double n, String crs})> _gridTicks = [];
@@ -359,6 +362,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
     if (name.length < 2) return;
+    _hintName = name; // לרמז המסלול-הקלאסי (Overpass) ברקע
+    // מנוע-הכבישים ברקע **במקביל** לזיהוי-הרשת — מה שמצליח קודם מוצע.
+    _autoClassicalMatch();
     try {
       final uri = Uri.parse(
         'https://nominatim.openstreetmap.org/search'
@@ -1332,8 +1338,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
               ),
             ),
           ),
-        // אינדיקטור-רקע לא-חוסם (זיהוי-רשת בטעינה) — המשתמש עובד במקביל.
-        if (_autoRunning)
+        // אינדיקטור-רקע לא-חוסם (זיהוי אוטומטי בטעינה — רשת + כבישים
+        // במקביל) — המשתמש עובד ידנית במקביל.
+        if (_autoRunning || _autoClassicalRunning)
           Positioned(
             top: 8,
             right: 56,
@@ -1357,13 +1364,17 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      _autoStatus ?? 'מחפש רשת…',
+                      _autoStatus ??
+                          (_autoClassicalRunning
+                              ? 'מחפש עוגני-כבישים…'
+                              : 'מחפש רשת…'),
                       style: const TextStyle(color: Colors.white, fontSize: 12),
                     ),
                     InkWell(
                       onTap: () => setState(() {
                         _autoCancelled = true;
                         _autoRunning = false;
+                        _autoClassicalRunning = false;
                         _autoStatus = null;
                       }),
                       child: const Padding(
@@ -1754,17 +1765,30 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       }
       return;
     }
-    // נמצאה רשת. אם המשתמש כבר התחיל לנעוץ ידנית (silent) — לא דורסים,
-    // מציעים בעדינות. אחרת מציבים ומציגים תצוגה-מקדימה.
-    if (silent && _points.isNotEmpty) {
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(const SnackBar(
-          content: Text('זוהתה רשת-קואורדינטות ברקע — לחץ ⊞ להצגתה.'),
-          duration: Duration(seconds: 5),
-        ));
+    // נמצאה רשת. הרצה **מפורשת** (⊞) → מציבים ומציגים מיד. **רקע** (silent)
+    // → מציעים בסנאקבר עם כפתור (לא דורסים עבודה ידנית), אלא-אם כבר הוצעה
+    // תוצאה אוטומטית אחרת.
+    if (!silent) {
+      _applyGridTicks(ticks);
       return;
     }
+    if (_autoResultShown) return;
+    _autoResultShown = true;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text('זוהתה רשת-קואורדינטות (${ticks.length} נקודות)!'),
+        duration: const Duration(seconds: 10),
+        action: SnackBarAction(
+          label: 'הצג ואשר',
+          onPressed: () => _applyGridTicks(ticks),
+        ),
+      ));
+  }
+
+  /// מציב את נקודות-הבקרה מצלבי-הרשת, מסנתז נקודה-3 ומחשב → תצוגה-מקדימה.
+  void _applyGridTicks(
+      List<({Offset pixel, double e, double n, String crs})> ticks) {
     setState(() {
       _points.clear();
       _gridTicks.clear();
@@ -1777,13 +1801,73 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     });
     if (_gridTicks.length == 2) _synthesizeThirdGridPoint();
     _calculate();
-    ScaffoldMessenger.of(context)
-      ..clearSnackBars()
-      ..showSnackBar(SnackBar(
-        content: Text('זוהתה רשת אוטומטית (${ticks.length} נקודות) — '
-            'בדוק בתצוגה-המקדימה ואשר.'),
-        duration: const Duration(seconds: 4),
-      ));
+  }
+
+  /// **מנוע-הכבישים ברקע** — במקביל לזיהוי-הרשת. מריץ את המסלול-הקלאסי
+  /// (Overpass+RANSAC) עם רמז-שם-הקובץ, ואם מצא עוגנים — מציע בסנאקבר
+  /// (בלי לחסום). מה שמצליח קודם (רשת/כבישים) מוצע; השני נדחה.
+  Future<void> _autoClassicalMatch() async {
+    if (_hintName == null || _autoClassicalRunning) return;
+    if (_imageWidth == 0) await _loadImageSize();
+    if (!mounted || _imageWidth == 0) return;
+    setState(() => _autoClassicalRunning = true);
+    try {
+      final suggestions = await GeminiAnchorService().suggestAnchors(
+        imagePath: widget.imagePath,
+        imageWidth: _imageWidth,
+        imageHeight: _imageHeight,
+        areaHint: _hintName,
+        northUp: true, // בערך-צפון ±20° (רוב מפות-היישוב)
+      );
+      if (!mounted) return;
+      final usable = suggestions.where((s) => s.verified != false).toList();
+      if (usable.length < 3 || _autoResultShown || _points.isNotEmpty) return;
+      _autoResultShown = true;
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(
+          content: Text('זוהו עוגני-כבישים אוטומטית (${usable.length})!'),
+          duration: const Duration(seconds: 10),
+          action: SnackBarAction(
+            label: 'פתח לאישור',
+            onPressed: () => _openAdjustVerify(suggestions),
+          ),
+        ));
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _autoClassicalRunning = false);
+    }
+  }
+
+  /// פותח את מסך הכוונון-ואישור עם הצעות-העוגנים ומחיל את המאושרות.
+  Future<void> _openAdjustVerify(
+      List<GeminiAnchorSuggestion> suggestions) async {
+    final approved = await Navigator.push<List<({Offset pixel, LatLng world})>>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AdjustVerifyScreen(
+          imagePath: widget.imagePath,
+          imageWidth: _imageWidth,
+          imageHeight: _imageHeight,
+          suggestions: suggestions,
+          refMap: _refMap,
+        ),
+      ),
+    );
+    if (!mounted || approved == null || approved.length < 3) return;
+    setState(() {
+      _points
+        ..clear()
+        ..addAll([
+          for (final a in approved)
+            _ControlPoint(pixel: a.pixel)..world = a.world,
+        ]);
+      _suggestions = [];
+      _isOnMap = false;
+      _result = null;
+    });
+    _calculate();
+    if (_result != null) await _confirm();
   }
 
   // ═══ מצב מפה ═══
