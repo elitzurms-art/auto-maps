@@ -126,7 +126,6 @@ class GeminiAnchorService {
     required int imageWidth,
     required int imageHeight,
     String? areaHint,
-    bool northUp = false,
     bool exactNorth = false,
     double? compassDeg,
     bool compassResolved = false,
@@ -176,53 +175,56 @@ class GeminiAnchorService {
         effectiveHint.isNotEmpty &&
         junctionPx.length >= 4) {
       try {
-        List<GeminiAnchorSuggestion>? classical;
-        if (northUp) {
-          onStatus?.call('מתאים רשת-כבישים מול OSM (בלי AI)...');
-          classical = await _classicalMatch(
-            junctionPx: junctionPx,
-            scanRound: scanRound,
-            roadPointsScan: roadPointsScan,
-            areaHint: effectiveHint,
-            exactNorth: exactNorth,
-            compassDeg: compassDeg,
-            compassResolved: compassResolved,
-          );
-        } else {
-          // מפה מסובבת: מיישרים אותה (deskew) → מזהים על גרסה צירית
-          // (הגלאי חסין רק לתוכן צירי) → רישום north-up → מיפוי-עוגנים
-          // חזרה לקואורדינטות-המקור המסובבות.
-          onStatus?.call('מיישר את המפה ומאתר צמתים...');
-          final dsk =
-              await Isolate.run(() => _deskewDetectSync(detImg));
-          if (dsk != null && dsk.junctions.length >= 4) {
-            // מיפוי פיקסל-מיושר → פיקסל-מקור: הזזת-חיתוך → סיבוב-הפוך
-            // סביב מרכז-detImg → קנה-מידה למקור. (סימן -skew אומת ויזואלית.)
-            final t = -dsk.skew * pi / 180, ct = cos(t), st = sin(t);
-            final cDeskX = dsk.deskW / 2, cDeskY = dsk.deskH / 2;
-            final cDetX = dsk.detW / 2, cDetY = dsk.detH / 2;
-            final sX = imageWidth / dsk.detW, sY = imageHeight / dsk.detH;
-            Offset unmap(Offset p) {
-              final dx = p.dx + dsk.minX - cDeskX,
-                  dy = p.dy + dsk.minY - cDeskY;
-              return Offset(
-                (ct * dx - st * dy + cDetX) * sX,
-                (st * dx + ct * dy + cDetY) * sY,
-              );
-            }
-
-            onStatus?.call('מתאים רשת-כבישים מול OSM (בלי AI)...');
-            classical = await _classicalMatch(
-              junctionPx: dsk.junctions,
-              scanRound: dsk.rounds,
-              roadPointsScan: dsk.roads,
-              areaHint: effectiveHint,
-              unmapPixel: unmap,
-              cropW: dsk.cropW,
-              cropH: dsk.cropH,
+        // deskew — מיישר את המפה לפי-התוכן ותופס **כל זווית**. זול למפה
+        // ישרה (skew<2° → null); כבד רק למפה מסובבת (שם בדיוק רוצים אותו).
+        // נאסף כאן, ונשלח יחד עם המסלול-הישיר להתאמה **מאוחדת** (איסוף-OSM
+        // פעם אחת; כל אסטרטגיות-הכיוון מנוקדות יחד, הטובה מנצחת).
+        onStatus?.call('בודק כיוון-מפה (יישור אוטומטי)...');
+        final dsk = await Isolate.run(() => _deskewDetectSync(detImg));
+        ({
+          List<Point<double>> junctions,
+          List<bool> rounds,
+          List<Point<double>> roads,
+          int cropW,
+          int cropH,
+          Offset Function(Offset) unmap,
+        })? deskewBundle;
+        if (dsk != null && dsk.junctions.length >= 4) {
+          // מיפוי פיקסל-מיושר → פיקסל-מקור: הזזת-חיתוך → סיבוב-הפוך סביב
+          // מרכז-detImg → קנה-מידה למקור. (סימן -skew אומת ויזואלית.)
+          final t = -dsk.skew * pi / 180, ct = cos(t), st = sin(t);
+          final cDeskX = dsk.deskW / 2, cDeskY = dsk.deskH / 2;
+          final cDetX = dsk.detW / 2, cDetY = dsk.detH / 2;
+          final sX = imageWidth / dsk.detW, sY = imageHeight / dsk.detH;
+          Offset unmap(Offset p) {
+            final dx = p.dx + dsk.minX - cDeskX, dy = p.dy + dsk.minY - cDeskY;
+            return Offset(
+              (ct * dx - st * dy + cDetX) * sX,
+              (st * dx + ct * dy + cDetY) * sY,
             );
           }
+
+          deskewBundle = (
+            junctions: dsk.junctions,
+            rounds: dsk.rounds,
+            roads: dsk.roads,
+            cropW: dsk.cropW,
+            cropH: dsk.cropH,
+            unmap: unmap,
+          );
         }
+
+        onStatus?.call('מתאים רשת-כבישים מול OSM (כל הזוויות, בלי AI)...');
+        final classical = await _classicalMatch(
+          junctionPx: junctionPx,
+          scanRound: scanRound,
+          roadPointsScan: roadPointsScan,
+          areaHint: effectiveHint,
+          exactNorth: exactNorth,
+          compassDeg: compassDeg,
+          compassResolved: compassResolved,
+          deskew: deskewBundle,
+        );
         if (classical != null && classical.length >= 4) {
           // סינון-שיורי רחב (90מ') — מפה סכמטית עשויה לסטות אמיתית; מה
           // שסוטה קיצונית = החלפת-נקודות, נזרק.
@@ -416,10 +418,12 @@ class GeminiAnchorService {
     return Point(dx + cw / 2, dy + ch / 2);
   }
 
-  /// [unmapPixel]: כשהצמתים ניתנו בפריים **מיושר** (deskew), הפונקציה
-  /// ממפה כל פיקסל-עוגן חזרה לקואורדינטות התמונה המקורית (המסובבת).
-  /// [cropW]/[cropH]: ממדי-הפריים-המיושר — כשנתונים, מנסה 4 אוריינטציות
-  /// (90°·k) ובוחר את הטובה (טיפול באמביגואיית-90° של deskew).
+  /// רישום גיאומטרי מול OSM — **מאוחד לכל הזוויות**. אוסף את OSM פעם אחת
+  /// ומנסה עליו את **כל אסטרטגיות-הכיוון** בניקוד משותף: (א) ישיר — חלונות
+  /// סביב מצפן / צפון-מדויק / ±20° (מפות בערך-ישרות); (ב) [deskew] (אם
+  /// נמסר) — המפה יושרה לפי-התוכן, 4 רבעים × שארית ±12° → תופס **כל זווית**
+  /// (35°/70°/…). הטוב-ביותר לפי-הניקוד מנצח חוצה-אסטרטגיות — כך "נעילה על
+  /// זווית שגויה" מפסידה להתאמה טובה-יותר במקום להתקבל.
   Future<List<GeminiAnchorSuggestion>?> _classicalMatch({
     required List<Point<double>> junctionPx,
     required List<bool> scanRound,
@@ -428,9 +432,14 @@ class GeminiAnchorService {
     bool exactNorth = false,
     double? compassDeg,
     bool compassResolved = false,
-    Offset Function(Offset)? unmapPixel,
-    int? cropW,
-    int? cropH,
+    ({
+      List<Point<double>> junctions,
+      List<bool> rounds,
+      List<Point<double>> roads,
+      int cropW,
+      int cropH,
+      Offset Function(Offset) unmap,
+    })? deskew,
   }) async {
     // bbox צמוד ליישוב — ריפוד רחב בולע יישוב שכן עם רשת-כבישים דומה
     // וגורם להתאמות-שווא (נצפה: נקודות נחתו בחיספין במקום בנוב).
@@ -445,39 +454,22 @@ class GeminiAnchorService {
       north: raw.north + dLat,
       east: raw.east + dLon,
     );
+    // איסוף-OSM **פעם אחת** — משותף לכל האסטרטגיות (בלי כפילות-רשת).
     final osm = await OverpassService.fetchJunctions(bbox);
     if (osm.junctions.length < 4) return null;
-
-    // הערה: מרכזי-שטח-צבעוניים (ירוק/מים) נבחנו כמאפיין-סוג נוסף אך
-    // **נדחו** — הם מדללים את מרחב-ה-RANSAC (עשרות שטחי-landuse ב-OSM)
-    // ומזיקים לדיוק (חולתה: 6 התאמות מול 11 בלי). התשתית נשמרת. גם
-    // אילוץ-סקלה מקו-היקף נדחה (יחס-מרחב מוטה במפה חלקית-זיהוי).
-
-    // **בערך-צפון**: חיפוש-זווית צמוד (±20° במסלול הישיר, ±12° אחרי deskew)
-    // — מוצא את הסיבוב-הקטן של המפה (מצפן) לפי התאמת-הצמתים ל-OSM, חסין
-    // לפריסת-הרחובות. חלון רחב מ-±20° מכניס פתרון-שווא (אמביגואיית-רשת).
-    // מפה מסובבת: הצמתים כבר יושרו (deskew), אך "מעלה" עשוי להיות
-    // 90/180/270 — 4 רבעי-סיבוב + חיפוש-קטן בכל רבע. הסיבוב מוחזר
-    // לקואורדינטות-המקור ע"י [unmapPixel] (עם היפוך-הרבע).
     final refGeo = osm.junctions;
-    final deskewMode = cropW != null && cropH != null;
-    final quarters = deskewMode ? 4 : 1;
-    Point<double> rotK(Point<double> p, int k) => deskewMode
-        ? _rot90(p, k, cropW.toDouble(), cropH.toDouble())
-        : p;
 
-    // מצבי-כיוון (מסלול ישיר): מצפן → חלון ±15° סביב הזווית שנקראה (וגם
-    // סביב שלילתה — סימן-הקריאה לא ודאי); צפון-מדויק → ±2°; אחרת בערך-צפון
-    // ±20°. deskew → ±12° סביב 0 (השארית אחרי היישור).
-    // כל איבר: (מרכז-הזווית, ±חלון). מצפן (זווית cwFromUp מהקורא-הקלאסי):
-    // מנסים סביבה **וסביב שלילתה** (המרה cwFromUp→סיבוב-טרנספורם — הסימן
-    // תלוי-מוסכמה, הגיאומטריה בוחרת). כשלא-מוכרע (ציר בלבד) — גם +180°
-    // (קצה-הציר הנגדי). **תמיד** כמעט-צפון 0°±20° כרשת-ביטחון — קריאה
-    // שגויה/מודל-חלש נופלת חזרה בלי נזק (הטוב-לפי-inliers מנצח).
-    final attempts = <(double, double)>[
-      if (deskewMode)
-        (0.0, 12.0)
-      else if (compassDeg != null) ...[
+    // ציון-השוואה **בין כל הניסיונות** (חוצה-אסטרטגיות): inliers ראשית,
+    // **חפיפת-כבישים כשובר-שוויון** — קריטי לזווית (180° סימטריית-רשת נותן
+    // inliers כמעט-זהה, וחפיפת-הכבישים בוחרת את הכיוון הנכון).
+    double scoreOf(MatchResult r) =>
+        r.inliers * 10 - (r.roadFitMeters.isNaN ? 0.0 : r.roadFitMeters);
+
+    // מצבי-כיוון ישירים: מצפן → ±15° סביב הזווית **וסביב שלילתה** (הסימן
+    // תלוי-מוסכמה, הגיאומטריה בוחרת), ולא-מוכרע → גם +180°; צפון-מדויק
+    // ±2°; אחרת בערך-צפון ±20°. תמיד כמעט-צפון כרשת-ביטחון.
+    final directAttempts = <(double, double)>[
+      if (compassDeg != null) ...[
         (compassDeg, 15.0),
         (-compassDeg, 15.0),
         if (!compassResolved) ...[
@@ -491,56 +483,73 @@ class GeminiAnchorService {
         (0.0, 20.0),
     ];
 
-    // ציון-השוואה **בין ניסיונות**: inliers ראשית, **חפיפת-כבישים כשובר-
-    // שוויון** — קריטי למצפן-ציר (צפון מול דרום): 180° סימטריית-רשת נותן
-    // מספר-inliers כמעט-זהה, וחפיפת-הכבישים (מפה הפוכה → כבישים לא חופפים)
-    // בוחרת את הכיוון הנכון. (בלי זה הפתרון-ההפוך היה מנצח לפי inliers.)
-    double scoreOf(MatchResult r) =>
-        r.inliers * 10 - (r.roadFitMeters.isNaN ? 0.0 : r.roadFitMeters);
-    MatchResult? res;
+    MatchResult? best;
     var bestScore = -double.infinity;
-    var bestK = 0;
-    for (var k = 0; k < quarters; k++) {
-      final scanCombined =
-          deskewMode ? [for (final j in junctionPx) rotK(j, k)] : junctionPx;
-      final rr = deskewMode
-          ? [for (final r in roadPointsScan) rotK(r, k)]
-          : roadPointsScan;
-      for (final att in attempts) {
+    var bestScanCount = junctionPx.length;
+    Offset Function(Point<double>)? bestToOrig;
+
+    // ── אסטרטגיה ישירה (בלי סיבוב-גס; פיקסל=מקור) ──
+    for (final att in directAttempts) {
+      final r = await AnchorMatcher.registerSweepInIsolate(
+        scanPx: junctionPx,
+        refGeo: refGeo,
+        scanRound: scanRound,
+        refRound: osm.isRoundabout,
+        scanRoad: roadPointsScan.isEmpty ? null : roadPointsScan,
+        refRoad: osm.roadPoints,
+        maxRotationDeg: att.$2,
+        centerRotationDeg: att.$1,
+      );
+      if (r != null && scoreOf(r) > bestScore) {
+        bestScore = scoreOf(r);
+        best = r;
+        bestScanCount = junctionPx.length;
+        bestToOrig = (px) => Offset(px.x, px.y);
+      }
+    }
+
+    // ── אסטרטגיית deskew (כל הזוויות: 4 רבעים × שארית ±12°) ──
+    if (deskew != null && deskew.junctions.length >= 4) {
+      final cw = deskew.cropW.toDouble(), ch = deskew.cropH.toDouble();
+      final unmap = deskew.unmap;
+      for (var k = 0; k < 4; k++) {
+        final scanCombined = [
+          for (final j in deskew.junctions) _rot90(j, k, cw, ch)
+        ];
+        final rr = [for (final r in deskew.roads) _rot90(r, k, cw, ch)];
         final r = await AnchorMatcher.registerSweepInIsolate(
           scanPx: scanCombined,
           refGeo: refGeo,
-          scanRound: scanRound,
+          scanRound: deskew.rounds,
           refRound: osm.isRoundabout,
           scanRoad: rr.isEmpty ? null : rr,
           refRoad: osm.roadPoints,
-          maxRotationDeg: att.$2,
-          centerRotationDeg: att.$1,
+          maxRotationDeg: 12.0,
+          centerRotationDeg: 0.0,
         );
         if (r != null && scoreOf(r) > bestScore) {
           bestScore = scoreOf(r);
-          res = r;
-          bestK = k;
+          best = r;
+          bestScanCount = deskew.junctions.length;
+          final kk = k;
+          // מיפוי-עוגן חזרה: היפוך-הרבע (בפריים-המיושר) ואז unmap למקור.
+          bestToOrig = (px) {
+            final p = _rot90(px, (4 - kk) & 3, cw, ch);
+            return unmap(Offset(p.x, p.y));
+          };
         }
       }
     }
-    // דורשים יחס-inliers סביר — מגן מפני התאמה-חלקית מקרית.
-    final minReq = max(4, (junctionPx.length * 0.35).round());
-    if (res == null || res.inliers < minReq) return null;
 
-    // מיפוי-עוגן חזרה: היפוך-הרבע (בפריים-המיושר) ואז unmap למקור.
-    Offset toOrig(Point<double> px) {
-      final p = deskewMode
-          ? _rot90(px, (4 - bestK) & 3, cropW.toDouble(), cropH.toDouble())
-          : px;
-      final o = Offset(p.x, p.y);
-      return unmapPixel != null ? unmapPixel(o) : o;
-    }
+    // דורשים יחס-inliers סביר (יחסית לספירת-הצמתים של האסטרטגיה הזוכה) —
+    // מגן מפני התאמה-חלקית מקרית.
+    final minReq = max(4, (bestScanCount * 0.35).round());
+    if (best == null || best.inliers < minReq) return null;
 
     return [
-      for (final m in res.matches)
+      for (final m in best.matches)
         GeminiAnchorSuggestion(
-          pixel: toOrig(m.pixel),
+          pixel: bestToOrig!(m.pixel),
           world: m.world,
           name: m.isRoundabout ? 'כיכר' : 'צומת כבישים',
           confidence: 1,
@@ -548,7 +557,7 @@ class GeminiAnchorService {
               ? 'התאמת כיכר מול OSM'
               : 'התאמת רשת-כבישים מול OSM',
           verified: true,
-          verifyNote: 'רישום גיאומטרי (RANSAC, ${res.inliers} התאמות)',
+          verifyNote: 'רישום גיאומטרי (RANSAC, ${best.inliers} התאמות)',
           verifyKind: AnchorVerifyKind.geometric,
         ),
     ];

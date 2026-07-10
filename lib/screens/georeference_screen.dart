@@ -1840,40 +1840,22 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     if (!mounted || _imageWidth == 0) return;
     setState(() => _autoClassicalRunning = true);
     try {
-      // זיהוי-מצפן קלאסי (כמו בדיאלוג ✨) — מחזק את ההתאמה למפות מוטות.
+      // זיהוי-מצפן קלאסי (מחזק את המסלול-הישיר). suggestAnchors מנסה עכשiv
+      // **את כל אסטרטגיות-הכיוון בקריאה אחת** (ישיר + deskew-לכל-הזוויות)
+      // ובוחר את הטובה לפי-איכות — אין צורך בקריאה שנייה.
       final compass =
           await GeminiAnchorService().detectCompass(imagePath: widget.imagePath);
       if (!mounted) return;
-      // מסלול 1 — **בערך-צפון** (±20° / ±15° סביב מצפן). מהיר, רוב המפות.
-      var suggestions = await GeminiAnchorService().suggestAnchors(
+      final suggestions = await GeminiAnchorService().suggestAnchors(
         imagePath: widget.imagePath,
         imageWidth: _imageWidth,
         imageHeight: _imageHeight,
         areaHint: _hintName,
-        northUp: true,
         compassDeg: compass?.deg,
         compassResolved: compass?.resolved ?? false,
       );
       if (!mounted) return;
-      var usable = suggestions.where((s) => s.verified != false).toList();
-      // מסלול 2 (נפילה-חזרה) — **deskew**: מיישר את המפה לפי התוכן (בלי
-      // תלות במצפן) ותופס **כל זווית** (נוב-35° וכד'). מחליף את הדיאלוג
-      // הישן שבו בחרנו ידנית את הכיוון. בטוח: מפה ישרה → deskew מחזיר ריק.
-      if (usable.length < 3) {
-        final rotated = await GeminiAnchorService().suggestAnchors(
-          imagePath: widget.imagePath,
-          imageWidth: _imageWidth,
-          imageHeight: _imageHeight,
-          areaHint: _hintName,
-          northUp: false, // מפעיל את מסלול-ה-deskew (כל זווית)
-        );
-        if (!mounted) return;
-        final ru = rotated.where((s) => s.verified != false).toList();
-        if (ru.length >= 3) {
-          suggestions = rotated;
-          usable = ru;
-        }
-      }
+      final usable = suggestions.where((s) => s.verified != false).toList();
       if (usable.length >= 3) _autoRoadResult = suggestions;
     } catch (_) {
     } finally {
