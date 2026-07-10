@@ -1707,6 +1707,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     try {
       final scan = await _ensureScanImage();
       if (scan != null) {
+        // ⚠️ timeout קשיח — OCR (Tesseract) על תמונה מוגדלת ×3 יכול להיות
+        // איטי/להיתקע (Process.run בלי-timeout); גבול-עליון משחרר את הבר.
         ticks = await GridCoordService.autoDetectTicks(
           scan,
           onProgress: (status, frac) {
@@ -1715,6 +1717,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             // מציגים את שלב-ההתקדמות.
             if (!silent) setState(() => _progressText = status);
           },
+        ).timeout(
+          Duration(seconds: silent ? 45 : 90),
+          onTimeout: () =>
+              const <({Offset pixel, double e, double n, String crs})>[],
         );
       }
     } catch (_) {}
@@ -1843,17 +1849,22 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       // זיהוי-מצפן קלאסי (מחזק את המסלול-הישיר). suggestAnchors מנסה עכשiv
       // **את כל אסטרטגיות-הכיוון בקריאה אחת** (ישיר + deskew-לכל-הזוויות)
       // ובוחר את הטובה לפי-איכות — אין צורך בקריאה שנייה.
-      final compass =
-          await GeminiAnchorService().detectCompass(imagePath: widget.imagePath);
+      // ⚠️ timeout קשיח — Overpass יכול לתקוע עד 75ש', וזיהוי-כפול
+      // (ישיר+deskew) כבד. גבול-עליון כדי שהבר לא ייתקע; חריגה ⇒ בלי תוצאה.
+      final compass = await GeminiAnchorService()
+          .detectCompass(imagePath: widget.imagePath)
+          .timeout(const Duration(seconds: 20), onTimeout: () => null);
       if (!mounted) return;
-      final suggestions = await GeminiAnchorService().suggestAnchors(
-        imagePath: widget.imagePath,
-        imageWidth: _imageWidth,
-        imageHeight: _imageHeight,
-        areaHint: _hintName,
-        compassDeg: compass?.deg,
-        compassResolved: compass?.resolved ?? false,
-      );
+      final suggestions = await GeminiAnchorService()
+          .suggestAnchors(
+            imagePath: widget.imagePath,
+            imageWidth: _imageWidth,
+            imageHeight: _imageHeight,
+            areaHint: _hintName,
+            compassDeg: compass?.deg,
+            compassResolved: compass?.resolved ?? false,
+          )
+          .timeout(const Duration(seconds: 50), onTimeout: () => const []);
       if (!mounted) return;
       final usable = suggestions.where((s) => s.verified != false).toList();
       if (usable.length >= 3) _autoRoadResult = suggestions;
