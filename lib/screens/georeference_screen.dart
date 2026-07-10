@@ -1844,17 +1844,36 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       final compass =
           await GeminiAnchorService().detectCompass(imagePath: widget.imagePath);
       if (!mounted) return;
-      final suggestions = await GeminiAnchorService().suggestAnchors(
+      // מסלול 1 — **בערך-צפון** (±20° / ±15° סביב מצפן). מהיר, רוב המפות.
+      var suggestions = await GeminiAnchorService().suggestAnchors(
         imagePath: widget.imagePath,
         imageWidth: _imageWidth,
         imageHeight: _imageHeight,
         areaHint: _hintName,
-        northUp: true, // בערך-צפון ±20° (רוב מפות-היישוב)
+        northUp: true,
         compassDeg: compass?.deg,
         compassResolved: compass?.resolved ?? false,
       );
       if (!mounted) return;
-      final usable = suggestions.where((s) => s.verified != false).toList();
+      var usable = suggestions.where((s) => s.verified != false).toList();
+      // מסלול 2 (נפילה-חזרה) — **deskew**: מיישר את המפה לפי התוכן (בלי
+      // תלות במצפן) ותופס **כל זווית** (נוב-35° וכד'). מחליף את הדיאלוג
+      // הישן שבו בחרנו ידנית את הכיוון. בטוח: מפה ישרה → deskew מחזיר ריק.
+      if (usable.length < 3) {
+        final rotated = await GeminiAnchorService().suggestAnchors(
+          imagePath: widget.imagePath,
+          imageWidth: _imageWidth,
+          imageHeight: _imageHeight,
+          areaHint: _hintName,
+          northUp: false, // מפעיל את מסלול-ה-deskew (כל זווית)
+        );
+        if (!mounted) return;
+        final ru = rotated.where((s) => s.verified != false).toList();
+        if (ru.length >= 3) {
+          suggestions = rotated;
+          usable = ru;
+        }
+      }
       if (usable.length >= 3) _autoRoadResult = suggestions;
     } catch (_) {
     } finally {
