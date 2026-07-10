@@ -82,7 +82,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   // מצב **רשת-קואורדינטות**: הקשה על צלב-רשת → OCR קורא את הקואורדינטה
   // המודפסת (ITM/UTM) וממלא את ה-world אוטומטית. דורש Tesseract (Windows).
   bool _gridMode = false;
-  bool _ocrAvailable = false;
   bool _gridBusy = false;
   // טקסט-שלב בזמן OCR **מפורש** (⊞) — חלון-חוסם עם פס-אנימציה.
   String? _progressText;
@@ -155,7 +154,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
 
   // מצב אוטומטי — הצעות עוגנים מ-Gemini הממתינות לאישור פר-נקודה
   List<GeminiAnchorSuggestion> _suggestions = [];
-  bool _aiBusy = false;
   bool _warping = false;
 
 
@@ -166,10 +164,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     _refMap.addListener(_onRefMapChanged);
     // גילוי אוטומטי של קבצי-מפה בתיקיית-הייחוס המשתמעת (reference_maps).
     _refMap.loadDefaultFolder();
-    // זמינות-OCR (Tesseract) — קובעת אם להציע את מצב רשת-הקואורדינטות.
+    // זמינות-OCR (Tesseract) — מנוע-הרשת רץ אוטומטית בטעינה אם קיים.
     OcrService.available().then((ok) {
       if (!mounted) return;
-      setState(() => _ocrAvailable = ok);
       // מנוע-הרשת רץ **אוטומטית בטעינה** (במקביל למנוע-הכבישים). אם אין
       // OCR — מסמנים את הרשת כ"סיימה" (בלי תוצאה) כדי שהבוחר עדיין יופיע
       // עבור תוצאת-הכבישים.
@@ -519,127 +516,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   // ═══ גלאי הצמתים המקומי (בלי AI, בלי רשת) ═══
 
   /// מציג/מסתיר את צמתי-הגלאי על התמונה. הריצה ב-Isolate (הדילול כבד).
-  // ═══ מצב אוטומטי — הצעת עוגנים (Gemini) ═══
-
-  Future<void> _runAiSuggest() async {
-    if (_aiBusy) return;
-
-    // רמז-מיקום **חובה** — עם רמז המסלול הקלאסי רץ בלי שום קריאת-מודל
-    // (Overpass בלבד). Gemini לא מעורב בתהליך הזה; אם המסלול הקלאסי נכשל
-    // וצריך נפילה-חזרה ל-AI — משתמשים במנוע-המקומי (לפי בחירת ⚙), לא ב-Gemini.
-    final opts = await _promptAreaHint();
-    if (opts == null || !mounted) return;
-
-    setState(() => _aiBusy = true);
-    try {
-      final suggestions = await GeminiAnchorService().suggestAnchors(
-        imagePath: widget.imagePath,
-        imageWidth: _imageWidth,
-        imageHeight: _imageHeight,
-        areaHint: opts.hint.isEmpty ? null : opts.hint,
-        northUp: opts.northUp,
-        exactNorth: opts.exactNorth,
-        compassDeg: opts.compassDeg,
-        compassResolved: opts.compassResolved,
-        onStatus: (status) {
-          if (!mounted) return;
-          ScaffoldMessenger.of(context)
-            ..clearSnackBars()
-            ..showSnackBar(
-              SnackBar(
-                content: Text(status),
-                duration: const Duration(minutes: 2),
-              ),
-            );
-        },
-      );
-      if (!mounted) return;
-      // עוגנים שנדחו כבר באימות מסומנים verified:false — המסך החדש
-      // יראה אותם פסולים-כברירת-מחדל (המשתמש יכול לשחזר).
-      final usable = suggestions.where((s) => s.verified != false).toList();
-      if (usable.length < 3) {
-        final rejected = suggestions.length - usable.length;
-        ScaffoldMessenger.of(context)
-          ..clearSnackBars()
-          ..showSnackBar(
-            SnackBar(
-              content: Text('לא נמצאו מספיק עוגנים'
-                  '${rejected > 0 ? ' ($rejected נדחו)' : ''} — נעץ ידנית'),
-              duration: const Duration(seconds: 6),
-            ),
-          );
-        return;
-      }
-      ScaffoldMessenger.of(context).clearSnackBars();
-      // מסך "כוונון ואישור" — בד-שילוב יחיד, הכל מאושר כברירת-מחדל.
-      final approved =
-          await Navigator.push<List<({Offset pixel, LatLng world})>>(
-        context,
-        MaterialPageRoute(
-          builder: (_) => AdjustVerifyScreen(
-            imagePath: widget.imagePath,
-            imageWidth: _imageWidth,
-            imageHeight: _imageHeight,
-            suggestions: suggestions,
-            refMap: _refMap,
-          ),
-        ),
-      );
-      if (!mounted || approved == null || approved.length < 3) return;
-      setState(() {
-        _points
-          ..clear()
-          ..addAll([
-            for (final a in approved) _ControlPoint(pixel: a.pixel)..world = a.world,
-          ]);
-        _suggestions = [];
-        _isOnMap = false;
-        _result = null;
-      });
-      _calculate();
-      if (_result != null) await _confirm();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(SnackBar(content: Text('הצעת עוגנים נכשלה: $e')));
-    } finally {
-      if (mounted) setState(() => _aiBusy = false);
-    }
-  }
-
-  /// דיאלוג שם-האזור (חובה) + בחירת-כיוון. תוך כדי הקלדת-השם, המודל
-  /// (מקומי/Gemini לפי ⚙) קורא ברקע את **חץ-הצפון** שבמפה; אם נמצא — הכיוון
-  /// נקבע אוטומטית (עידון ±15° סביבו). אחרת — בחירה-ידנית (מדויק/±20°/מסובבת).
-  Future<
-      ({
-        String hint,
-        bool northUp,
-        bool exactNorth,
-        double? compassDeg,
-        bool compassResolved
-      })?> _promptAreaHint() async {
-    final initial = await GeminiAnchorService.getAreaHint() ?? '';
-    if (!mounted) return null;
-    final result = await showDialog<
-        ({
-          String hint,
-          bool northUp,
-          bool exactNorth,
-          double? compassDeg,
-          bool compassResolved
-        })>(
-      context: context,
-      builder: (ctx) => _OrientationDialog(
-        imagePath: widget.imagePath,
-        initialHint: initial,
-      ),
-    );
-    if (result != null && result.hint.isNotEmpty) {
-      await GeminiAnchorService.setAreaHint(result.hint);
-    }
-    return result;
-  }
 
   /// אישור/דחייה של הצעת-עוגן בודדת — הלב של "אישור פר-נקודה".
   ///
@@ -1003,28 +879,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             title: _showChooser
                 ? const Text('בחירת מקור התאמה')
                 : Text('ג\'יאורפרנס ($_completeCount / $_minPoints נקודות)'),
-            actions: _showChooser
-                ? const []
-                : [
-                    // מצב אוטומטי — הצעת עוגנים מ-Gemini עם אישור פר-נקודה
-                    _aiBusy
-                ? const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 14),
-                    child: Center(
-                      child: SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    ),
-                  )
-                : IconButton(
-                    icon: const Icon(Icons.auto_awesome),
-                    tooltip: 'הצעת עוגנים אוטומטית (AI)',
-                    onPressed: _runAiSuggest,
-                  ),
-          ],
-        ),
+          ),
         body: _showChooser
             ? _buildChooserView()
             : Column(
@@ -1204,10 +1059,21 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                         ),
                       ],
                     )
-                  else if (grid == null && road == null)
-                    const Text('לא זוהו התאמות אוטומטיות למפה זו.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.grey)),
+                  else
+                    // שקיפות: מנוע שסיים בלי תוצאה נרשם כאן (רץ ולא-מצא,
+                    // להבדיל מ"לא-רץ") כדי שיובן למה מוצעת רק אפשרות אחת.
+                    Column(
+                      children: [
+                        if (grid == null && _autoGridDone)
+                          const Text('מנוע-הרשת: לא נמצאה רשת-קואורדינטות',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.grey, fontSize: 12)),
+                        if (road == null && _autoRoadDone)
+                          const Text('מנוע-הכבישים: לא נמצאה התאמה',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.grey, fontSize: 12)),
+                      ],
+                    ),
                 ],
               ),
             ),
@@ -1365,38 +1231,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             ),
           ),
         ),
-        // כפתור מצב רשת-קואורדינטות (OCR) — רק כשיש Tesseract.
-        if (_ocrAvailable)
-          Positioned(
-            top: 8,
-            left: 56,
-            child: Material(
-              color: _gridMode ? Colors.teal[50] : Colors.white,
-              elevation: 2,
-              borderRadius: BorderRadius.circular(8),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(8),
-                onTap: () {
-                  final turningOn = !_gridMode;
-                  setState(() {
-                    _gridMode = turningOn;
-                    if (turningOn) _crosshairMode = false;
-                  });
-                  // הדלקה → ניסיון זיהוי-רשת אוטומטי (מנקה נקודות קודמות).
-                  if (turningOn) _autoDetectGrid();
-                },
-                child: SizedBox(
-                  width: 40,
-                  height: 40,
-                  child: Icon(
-                    Icons.grid_on,
-                    color: _gridMode ? Colors.teal : Colors.grey[700],
-                    size: 22,
-                  ),
-                ),
-              ),
-            ),
-          ),
+        // (כפתורי ✨/⊞ הוסרו — הזרימה היא האוטומטית בלבד; ידני = נעיצה רגילה.)
         // רמז למצב-הרשת
         if (_gridMode)
           Positioned(
@@ -2432,237 +2267,4 @@ class _CrosshairPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-/// מצבי-כיוון של המפה לבחירה בדיאלוג.
-enum _OrientMode { compass, nearNorth, exactNorth, rotated }
-
-/// דיאלוג "שם + כיוון": שדה-שם חובה, ובמקביל המודל קורא את חץ-הצפון.
-/// כשנמצא חץ — מוצג "✓ נמצא חץ-צפון" והכיוון נבחר אוטומטית (ניתן לעקוף
-/// לבחירה-ידנית). כשאין מנוע/חץ — בחירה-ידנית (מדויק/±20°/מסובבת).
-class _OrientationDialog extends StatefulWidget {
-  const _OrientationDialog({
-    required this.imagePath,
-    required this.initialHint,
-  });
-
-  final String imagePath;
-  final String initialHint;
-
-  @override
-  State<_OrientationDialog> createState() => _OrientationDialogState();
-}
-
-class _OrientationDialogState extends State<_OrientationDialog> {
-  late final TextEditingController _ctrl =
-      TextEditingController(text: widget.initialHint);
-  bool _detecting = false;
-  bool _detectDone = false;
-  double? _compassDeg;
-  bool _compassResolved = false;
-  _OrientMode _mode = _OrientMode.nearNorth;
-
-  @override
-  void initState() {
-    super.initState();
-    _detecting = true;
-    _detectCompass();
-  }
-
-  Future<void> _detectCompass() async {
-    ({double deg, bool resolved})? c;
-    try {
-      c = await GeminiAnchorService()
-          .detectCompass(imagePath: widget.imagePath)
-          .timeout(const Duration(seconds: 20));
-    } catch (_) {
-      c = null;
-    }
-    if (!mounted) return;
-    setState(() {
-      _detecting = false;
-      _detectDone = true;
-      _compassDeg = c?.deg;
-      _compassResolved = c?.resolved ?? false;
-      // נמצא מצפן → בוחר אוטומטית "לפי מצפן"; אחרת ברירת-מחדל כמעט-צפון.
-      _mode = c != null ? _OrientMode.compass : _OrientMode.nearNorth;
-    });
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  ({
-    String hint,
-    bool northUp,
-    bool exactNorth,
-    double? compassDeg,
-    bool compassResolved
-  }) _result() {
-    final hint = _ctrl.text.trim();
-    switch (_mode) {
-      case _OrientMode.compass:
-        return (
-          hint: hint,
-          northUp: true,
-          exactNorth: false,
-          compassDeg: _compassDeg,
-          compassResolved: _compassResolved,
-        );
-      case _OrientMode.exactNorth:
-        return (
-          hint: hint,
-          northUp: true,
-          exactNorth: true,
-          compassDeg: null,
-          compassResolved: false,
-        );
-      case _OrientMode.nearNorth:
-        return (
-          hint: hint,
-          northUp: true,
-          exactNorth: false,
-          compassDeg: null,
-          compassResolved: false,
-        );
-      case _OrientMode.rotated:
-        return (
-          hint: hint,
-          northUp: false,
-          exactNorth: false,
-          compassDeg: null,
-          compassResolved: false,
-        );
-    }
-  }
-
-  Widget _radio(_OrientMode m, String title, String subtitle) {
-    return RadioListTile<_OrientMode>(
-      value: m,
-      groupValue: _mode,
-      onChanged: (v) => setState(() => _mode = v ?? _mode),
-      contentPadding: EdgeInsets.zero,
-      dense: true,
-      title: Text(title),
-      subtitle: Text(subtitle, style: const TextStyle(fontSize: 12)),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final canRun = _ctrl.text.trim().isNotEmpty;
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: AlertDialog(
-        title: const Text('שם היישוב וכיוון המפה'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'הזן את שם היישוב/האזור — דרוש לאיתור האזור ולהתאמה '
-                'הקלאסית (בלי AI/ענן).',
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _ctrl,
-                autofocus: true,
-                onChanged: (_) => setState(() {}),
-                decoration: const InputDecoration(
-                  labelText: 'למשל: נוב רמת הגולן',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 12),
-              // ── אזור-הכיוון ──
-              if (_detecting)
-                Row(
-                  children: const [
-                    SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                    SizedBox(width: 10),
-                    Expanded(child: Text('מעבד מפה… (מחפש חץ-צפון)')),
-                  ],
-                )
-              else ...[
-                if (_detectDone && _compassDeg != null)
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.green.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.check_circle,
-                            color: Colors.green, size: 20),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'עיבוד הצליח! זוהה חץ-צפון במפה '
-                            '(${_compassResolved ? 'כיוון' : 'ציר'} '
-                            '≈${_compassDeg!.round()}°). לחץ המשך.',
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
-                else if (_detectDone)
-                  const Text(
-                    'לא נמצא חץ-צפון במפה — בחר את כיוון המפה ידנית:',
-                    style: TextStyle(fontSize: 13, color: Colors.black54),
-                  ),
-                const SizedBox(height: 4),
-                // רדיו-כיוון. כשנמצא מצפן — מוצג גם כאפשרות (ברירת-מחדל)
-                // וניתן לעקוף לידני.
-                if (_compassDeg != null)
-                  _radio(
-                    _OrientMode.compass,
-                    'לפי חץ-הצפון שזוהה (≈${_compassDeg!.round()}°)',
-                    'הכי מדויק — עידון גיאומטרי ±15° סביב הזווית שנקראה.',
-                  ),
-                _radio(
-                  _OrientMode.nearNorth,
-                  'כמעט-צפון (±20°)',
-                  'ברירת-מחדל למפות עם הטיה קטנה (מצפן ~10-15°).',
-                ),
-                _radio(
-                  _OrientMode.exactNorth,
-                  'צפון מדויק (0°)',
-                  'למפה שמיושרת לצפון בול — נעילה מוחלטת.',
-                ),
-                _radio(
-                  _OrientMode.rotated,
-                  'מסובבת (זווית גדולה)',
-                  'למפה שסובבה משמעותית — יישור-אוטומטי לפי הרחובות.',
-                ),
-              ],
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('ביטול'),
-          ),
-          ElevatedButton.icon(
-            // מותר להריץ רק עם שם; אם עדיין מזהה — ממתינים (הכפתור פעיל
-            // אחרי שהשם הוזן, אבל עדיף לתת לזיהוי להסתיים).
-            onPressed: canRun && !_detecting
-                ? () => Navigator.pop(context, _result())
-                : null,
-            icon: const Icon(Icons.auto_awesome),
-            label: Text(_detecting ? 'מעבד…' : 'המשך'),
-          ),
-        ],
-      ),
-    );
-  }
 }
