@@ -103,6 +103,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   // לידני". `_pointsAreAuto` מבחין בין נקודות-ידניות לנקודות-מאפשרות-אוטו.
   List<_ControlPoint>? _savedManualPoints;
   bool _pointsAreAuto = false;
+  // מסך-הבחירה (hub): החץ-אחורה מציג אותו במקום לצאת; תמיד יש בו "חזור
+  // לידני", וכשמנוע-אוטומטי מסיים — תוצאותיו מופיעות בו.
+  bool _showChooser = false;
   String? _hintName; // שם-האזור שנגזר משם-הקובץ (לרמז המסלול-הקלאסי)
   img.Image? _scanImage; // התמונה המפוענחת (לחיתוך חלונות-OCR)
   // צלבי-רשת שנקראו: פיקסל + קואורדינטה מוקרנת (מטרים) + CRS.
@@ -987,20 +990,24 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
 
     return Directionality(
       textDirection: TextDirection.rtl,
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text('ג\'יאורפרנס ($_completeCount / $_minPoints נקודות)'),
-          actions: [
-            // כפתור-בוחר קבוע — פותח מחדש את בחירת-ההתאמה (רשת/כבישים/ידני)
-            // כל עוד יש תוצאה-אוטומטית שמורה. מאפשר לעבור ביניהן בכל עת.
-            if (_autoGridResult != null || _autoRoadResult != null)
-              IconButton(
-                icon: const Icon(Icons.auto_fix_high),
-                tooltip: 'התאמות אוטומטיות (החלף מקור)',
-                onPressed: _showAutoChooser,
-              ),
-            // מצב אוטומטי — הצעת עוגנים מ-Gemini עם אישור פר-נקודה
-            _aiBusy
+      // יירוט כפתור-החזור: במצב-עריכה → מציג את מסך-הבחירה (hub) במקום
+      // לצאת; במסך-הבחירה עצמו → יוצא כרגיל (canPop=true).
+      child: PopScope(
+        canPop: _showChooser,
+        onPopInvokedWithResult: (didPop, _) {
+          if (didPop || _showChooser) return;
+          setState(() => _showChooser = true);
+        },
+        child: Scaffold(
+          appBar: AppBar(
+            title: _showChooser
+                ? const Text('בחירת מקור התאמה')
+                : Text('ג\'יאורפרנס ($_completeCount / $_minPoints נקודות)'),
+            actions: _showChooser
+                ? const []
+                : [
+                    // מצב אוטומטי — הצעת עוגנים מ-Gemini עם אישור פר-נקודה
+                    _aiBusy
                 ? const Padding(
                     padding: EdgeInsets.symmetric(horizontal: 14),
                     child: Center(
@@ -1018,7 +1025,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                   ),
           ],
         ),
-        body: Column(
+        body: _showChooser
+            ? _buildChooserView()
+            : Column(
           children: [
             Expanded(child: _isOnMap ? _buildMapView() : _buildImageView()),
 
@@ -1109,7 +1118,109 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           ],
         ),
       ),
+      ),
     );
+  }
+
+  /// **מסך-הבחירה (hub)** — נגיש דרך כפתור-החזור. תמיד יש בו "עבודה ידנית"
+  /// (גם בהתחלה, לפני שהמנועים סיימו); כשמנוע מסתיים תוצאתו מופיעה כאן.
+  Widget _buildChooserView() {
+    final grid = _autoGridResult;
+    final road = _autoRoadResult;
+    final saved = _savedManualPoints;
+    final running = _autoRunning || _autoClassicalRunning;
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(24, 24, 24, 56),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'בחר מקור-התאמה. אפשר לעבור ביניהם בכל עת דרך '
+                    'כפתור-החזור.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 15),
+                  ),
+                  const SizedBox(height: 24),
+                  // עבודה ידנית — **תמיד** (גם בהתחלה).
+                  FilledButton.icon(
+                    icon: const Icon(Icons.back_hand_outlined),
+                    label: Text(saved != null && saved.isNotEmpty
+                        ? 'חזרה לעבודה ידנית (${saved.length} נקודות)'
+                        : 'עבודה ידנית'),
+                    style: FilledButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                    ),
+                    onPressed: _chooseManual,
+                  ),
+                  if (grid != null) ...[
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      icon: const Icon(Icons.grid_on),
+                      label:
+                          Text('רשת-קואורדינטות (${grid.length} נקודות)'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.teal,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                      ),
+                      onPressed: () {
+                        setState(() => _showChooser = false);
+                        _applyGridTicks(grid);
+                      },
+                    ),
+                  ],
+                  if (road != null) ...[
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      icon: const Icon(Icons.alt_route),
+                      label: Text('עוגני-כבישים '
+                          '(${road.where((s) => s.verified != false).length})'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.indigo,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                      ),
+                      onPressed: () {
+                        setState(() => _showChooser = false);
+                        _openAdjustVerify(road);
+                      },
+                    ),
+                  ],
+                  const SizedBox(height: 24),
+                  if (running)
+                    Column(
+                      children: [
+                        const Text('מריץ התאמות אוטומטיות…',
+                            style: TextStyle(color: Colors.teal)),
+                        const SizedBox(height: 8),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(3),
+                          child: const LinearProgressIndicator(minHeight: 3),
+                        ),
+                      ],
+                    )
+                  else if (grid == null && road == null)
+                    const Text('לא זוהו התאמות אוטומטיות למפה זו.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// "עבודה ידנית" מהבוחר — משחזר נקודות-ידניות שמורות (אם יש) וחוזר לעריכה.
+  void _chooseManual() {
+    setState(() => _showChooser = false);
+    if (_savedManualPoints != null) _restoreManualPoints();
   }
 
   Widget _buildPickButtons(bool canCalculate) {
@@ -1800,89 +1911,26 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     _maybeOfferAuto();
   }
 
-  /// נקרא בסיום כל מנוע-רקע. מציג את **הבוחר** רק כששני המנועים סיימו
-  /// (רשת + כבישים) ולפחות אחד מצא תוצאה. לא מפריע אם המשתמש כבר עובד
-  /// ידנית — אז רק סנאקבר עדין שממנו אפשר לפתוח את הבוחר.
+  /// נקרא בסיום כל מנוע-רקע. כששני המנועים סיימו ולפחות אחד מצא תוצאה:
+  /// אם המשתמש עדיין לא נעץ ידנית — פותח מיד את מסך-הבחירה; אם כבר עובד
+  /// ידנית — סנאקבר עדין 'הצג' (כפתור-החזור תמיד יחזיר לבוחר ממילא).
   void _maybeOfferAuto() {
     if (!_autoGridDone || !_autoRoadDone) return;
     if (_autoOffered || !mounted) return;
     if (_autoGridResult == null && _autoRoadResult == null) return;
     _autoOffered = true;
-    if (_points.isNotEmpty) {
+    if (_points.any((p) => p.isComplete)) {
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
         ..showSnackBar(SnackBar(
           content: const Text('התאמות אוטומטיות מוכנות'),
           duration: const Duration(seconds: 10),
           action: SnackBarAction(
-              label: 'הצג', onPressed: _showAutoChooser),
+              label: 'הצג', onPressed: () => setState(() => _showChooser = true)),
         ));
       return;
     }
-    _showAutoChooser();
-  }
-
-  /// דיאלוג-בחירה בין תוצאות שני המנועים (נשמרות לצמיתות) — אפשר לעבור
-  /// ביניהן בכל עת, ולחזור לעבודה-הידנית שנשמרה. נפתח אוטומטית כששניהם
-  /// סיימו, וגם ידנית דרך הכפתור הקבוע בסרגל.
-  Future<void> _showAutoChooser() async {
-    final grid = _autoGridResult;
-    final road = _autoRoadResult;
-    final saved = _savedManualPoints; // צולם בהחלת-האפשרות (ראה _captureManualBeforeAuto)
-    if (grid == null && road == null) return;
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) => AlertDialog(
-        title: const Text('בחירת התאמה'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text('בחר מקור-התאמה. אפשר לעבור ביניהם ולחזור לידני '
-                'בכל עת מהכפתור בסרגל העליון.'),
-            const SizedBox(height: 16),
-            if (grid != null)
-              FilledButton.icon(
-                icon: const Icon(Icons.grid_on),
-                label: Text('רשת-קואורדינטות (${grid.length} נקודות)'),
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  _applyGridTicks(grid);
-                },
-              ),
-            if (grid != null && road != null) const SizedBox(height: 8),
-            if (road != null)
-              FilledButton.icon(
-                icon: const Icon(Icons.alt_route),
-                label: Text('עוגני-כבישים '
-                    '(${road.where((s) => s.verified != false).length})'),
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  _openAdjustVerify(road);
-                },
-              ),
-            if (saved != null && saved.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                icon: const Icon(Icons.back_hand_outlined),
-                label: Text('חזרה לנקודות הידניות (${saved.length})'),
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  _restoreManualPoints();
-                },
-              ),
-            ],
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('סגור'),
-          ),
-        ],
-      ),
-    );
+    setState(() => _showChooser = true);
   }
 
   /// משחזר את הנקודות-הידניות שצולמו לפני החלת האפשרות האוטומטית.
