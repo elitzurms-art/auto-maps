@@ -84,6 +84,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   bool _gridMode = false;
   bool _ocrAvailable = false;
   bool _gridBusy = false;
+  // התקדמות (טקסט + אחוז) בזמן OCR של זיהוי-הרשת.
+  String? _progressText;
+  double _progressValue = 0;
+  bool _autoTried = false; // ניסיון-אוטומטי בטעינה — פעם אחת
   img.Image? _scanImage; // התמונה המפוענחת (לחיתוך חלונות-OCR)
   // צלבי-רשת שנקראו: פיקסל + קואורדינטה מוקרנת (מטרים) + CRS.
   final List<({Offset pixel, double e, double n, String crs})> _gridTicks = [];
@@ -145,7 +149,15 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     _refMap.loadDefaultFolder();
     // זמינות-OCR (Tesseract) — קובעת אם להציע את מצב רשת-הקואורדינטות.
     OcrService.available().then((ok) {
-      if (mounted) setState(() => _ocrAvailable = ok);
+      if (!mounted) return;
+      setState(() => _ocrAvailable = ok);
+      // ניסיון-זיהוי-רשת **אוטומטי בטעינה** (כמו רמז-השם) — אם יש רשת-
+      // קואורדינטות היא תזוהה ותוצג לאישור בלי שום פעולה; אחרת נשארים
+      // במצב-ידני בשקט. פעם אחת.
+      if (ok && !_autoTried) {
+        _autoTried = true;
+        _autoDetectGrid(silent: true);
+      }
     });
     // רמז-מיקום משם-הקובץ — כדי שהדקירה הראשונה במצב-ידני תיפתח באזור הנכון.
     _resolveFilenameHint();
@@ -1267,22 +1279,46 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           ),
         // אינדיקטור-עומס בזמן קריאת-OCR
         if (_gridBusy)
-          const Positioned.fill(
-            child: IgnorePointer(
+          Positioned.fill(
+            child: Container(
+              color: Colors.black26,
               child: Center(
                 child: Card(
                   child: Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Row(
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.grid_on, size: 20),
+                            const SizedBox(width: 8),
+                            Text(
+                              _progressText ?? 'קורא קואורדינטה…',
+                              style: const TextStyle(fontSize: 14),
+                            ),
+                          ],
                         ),
-                        SizedBox(width: 12),
-                        Text('קורא קואורדינטה…'),
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: 260,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: LinearProgressIndicator(
+                              value: _progressText == null
+                                  ? null
+                                  : _progressValue,
+                              minHeight: 8,
+                            ),
+                          ),
+                        ),
+                        if (_progressText != null) ...[
+                          const SizedBox(height: 6),
+                          Text('${(_progressValue * 100).round()}%',
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.black54)),
+                        ],
                       ],
                     ),
                   ),
@@ -1612,23 +1648,46 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   /// **זיהוי-רשת אוטומטי** — מריץ OCR מלא, מזהה ומזווג את תוויות-הקואורדינטה
   /// לבד, מציב את נקודות-הבקרה, מחשב ומציג תצוגה-מקדימה. נכשל → הודעה
   /// והמשתמש יכול להקיש ידנית.
-  Future<void> _autoDetectGrid() async {
+  Future<void> _autoDetectGrid({bool silent = false}) async {
     if (_gridBusy) return;
-    setState(() => _gridBusy = true);
+    setState(() {
+      _gridBusy = true;
+      _progressText = 'מתחיל זיהוי-רשת…';
+      _progressValue = 0.05;
+    });
     var ticks = const <({Offset pixel, double e, double n, String crs})>[];
     try {
       final scan = await _ensureScanImage();
-      if (scan != null) ticks = await GridCoordService.autoDetectTicks(scan);
+      if (scan != null) {
+        ticks = await GridCoordService.autoDetectTicks(
+          scan,
+          onProgress: (status, frac) {
+            if (mounted) {
+              setState(() {
+                _progressText = status;
+                _progressValue = frac;
+              });
+            }
+          },
+        );
+      }
     } catch (_) {}
     if (!mounted) return;
-    setState(() => _gridBusy = false);
+    setState(() {
+      _gridBusy = false;
+      _progressText = null;
+    });
     if (ticks.length < 2) {
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(const SnackBar(
-          content: Text('לא זוהתה רשת אוטומטית — הקש ידנית על 2 צלבי-רשת.'),
-          duration: Duration(seconds: 4),
-        ));
+      // בטעינה-אוטומטית (silent) — בלי הודעה מפריעה; פשוט נשארים במצב-ידני.
+      if (!silent) {
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(const SnackBar(
+            content: Text('לא זוהתה רשת אוטומטית — הקש ידנית על 2 צלבי-רשת '
+                '(כפתור-הרשת ⊞), או נעץ נקודות ידנית.'),
+            duration: Duration(seconds: 4),
+          ));
+      }
       return;
     }
     setState(() {

@@ -93,8 +93,12 @@ class GridCoordService {
   /// CRS מהצפונים, ומזווג כל צפון למזרח הקרוב-ביותר → נקודות-בקרה. מחזיר
   /// רשימת (pixel, easting, northing, crs), או ריק אם לא נמצאו ≥2.
   static Future<List<({Offset pixel, double e, double n, String crs})>>
-      autoDetectTicks(img.Image src) async {
+      autoDetectTicks(
+    img.Image src, {
+    void Function(String status, double fraction)? onProgress,
+  }) async {
     const scale = 3;
+    onProgress?.call('מגדיל את התמונה ×3…', 0.12);
     final up = img.copyResize(src,
         width: src.width * scale, interpolation: img.Interpolation.cubic);
     final uw = up.width;
@@ -114,9 +118,11 @@ class GridCoordService {
     bool isNorthing(int v) =>
         (v >= 400000 && v <= 1300000) || (v >= 3000000 && v <= 4000000);
 
-    // צפונים מהמעבר-הרגיל (מיקום-מקורי = מרכז/scale).
+    // מעבר-רגיל **פעם אחת** — ממנו גם צפונים וגם מזרחים-אופקיים.
+    onProgress?.call('קורא תוויות אופקיות (OCR)…', 0.35);
+    final normalWords = await OcrService.readWords(nPath);
     final norths = <({double v, Offset px})>[];
-    for (final w in await OcrService.readWords(nPath)) {
+    for (final w in normalWords) {
       final v = roundVal(w.text);
       if (v != null && isNorthing(v)) {
         norths.add((v: v.toDouble(), px: Offset(w.cx / scale, w.cy / scale)));
@@ -129,14 +135,14 @@ class GridCoordService {
         utm ? (v >= 600000 && v <= 834000) : (v >= 100000 && v <= 300000);
 
     final easts = <({double v, Offset px})>[];
-    // מזרחים אופקיים (נדיר) מהמעבר-הרגיל.
-    for (final w in await OcrService.readWords(nPath)) {
+    for (final w in normalWords) {
       final v = roundVal(w.text);
       if (v != null && isEasting(v)) {
         easts.add((v: v.toDouble(), px: Offset(w.cx / scale, w.cy / scale)));
       }
     }
     // מזרחים אנכיים מהמעבר-המסובב (-90° CCW): dst(dx,dy)→src(uw-1-dy, dx).
+    onProgress?.call('קורא תוויות אנכיות (OCR)…', 0.7);
     for (final w in await OcrService.readWords(rPath)) {
       final v = roundVal(w.text);
       if (v != null && isEasting(v)) {
@@ -147,6 +153,7 @@ class GridCoordService {
       }
     }
     if (easts.isEmpty) return const [];
+    onProgress?.call('מזווג צפון↔מזרח ומחשב…', 0.92);
 
     // זיווג: לכל צפון, המזרח הקרוב-ביותר (אותה פינת-רשת). הפיקסל = אמצע
     // בין שתי התוויות (≈ פינת-הצלב, שגיאה זניחה).
