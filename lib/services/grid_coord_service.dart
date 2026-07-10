@@ -104,7 +104,7 @@ class GridCoordService {
     final rPath = '${dir.path}/_amauto_r.png';
     // ⚠️ ההגדלה (×3 → ~5760px) + קידוד-ה-PNG הם עבודה **סינכרונית כבדה**
     // (~שניות) — ב-Isolate כדי לא לתקוע את ה-UI (אחרת פס-ההתקדמות קופא).
-    onProgress?.call('מגדיל את התמונה ×3…', 0.15);
+    onProgress?.call('שלב 1/4: מגדיל את התמונה…', 0.15);
     final uw = await Isolate.run(() {
       final up = img.copyResize(src,
           width: src.width * scale, interpolation: img.Interpolation.cubic);
@@ -125,7 +125,7 @@ class GridCoordService {
         (v >= 400000 && v <= 1300000) || (v >= 3000000 && v <= 4000000);
 
     // מעבר-רגיל **פעם אחת** — ממנו גם צפונים וגם מזרחים-אופקיים.
-    onProgress?.call('קורא תוויות אופקיות (OCR)…', 0.35);
+    onProgress?.call('שלב 2/4: קורא תוויות אופקיות (OCR)…', 0.35);
     final normalWords = await OcrService.readWords(nPath);
     final norths = <({double v, Offset px})>[];
     for (final w in normalWords) {
@@ -148,7 +148,7 @@ class GridCoordService {
       }
     }
     // מזרחים אנכיים מהמעבר-המסובב (-90° CCW): dst(dx,dy)→src(uw-1-dy, dx).
-    onProgress?.call('קורא תוויות אנכיות (OCR)…', 0.7);
+    onProgress?.call('שלב 3/4: קורא תוויות אנכיות (OCR)…', 0.7);
     for (final w in await OcrService.readWords(rPath)) {
       final v = roundVal(w.text);
       if (v != null && isEasting(v)) {
@@ -159,7 +159,7 @@ class GridCoordService {
       }
     }
     if (easts.isEmpty) return const [];
-    onProgress?.call('מזווג צפון↔מזרח ומחשב…', 0.92);
+    onProgress?.call('שלב 4/4: מזווג ומחשב…', 0.92);
 
     // זיווג: לכל צפון, המזרח הקרוב-ביותר (אותה פינת-רשת). הפיקסל = אמצע
     // בין שתי התוויות (≈ פינת-הצלב, שגיאה זניחה).

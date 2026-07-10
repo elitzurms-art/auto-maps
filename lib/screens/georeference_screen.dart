@@ -84,9 +84,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   bool _gridMode = false;
   bool _ocrAvailable = false;
   bool _gridBusy = false;
-  // התקדמות (טקסט + אחוז) בזמן OCR של זיהוי-הרשת.
+  // טקסט-שלב בזמן OCR של זיהוי-הרשת (הפס עצמו אנימציה).
   String? _progressText;
-  double _progressValue = 0;
   bool _autoTried = false; // ניסיון-אוטומטי בטעינה — פעם אחת
   img.Image? _scanImage; // התמונה המפוענחת (לחיתוך חלונות-OCR)
   // צלבי-רשת שנקראו: פיקסל + קואורדינטה מוקרנת (מטרים) + CRS.
@@ -1301,24 +1300,15 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                           ],
                         ),
                         const SizedBox(height: 12),
-                        SizedBox(
+                        const SizedBox(
                           width: 260,
+                          // אנימציה (indeterminate) שזזה כל הזמן — פס-קבוע
+                          // באחוז נראה "תקוע" גם כשעובדים ברקע.
                           child: ClipRRect(
-                            borderRadius: BorderRadius.circular(6),
-                            child: LinearProgressIndicator(
-                              value: _progressText == null
-                                  ? null
-                                  : _progressValue,
-                              minHeight: 8,
-                            ),
+                            borderRadius: BorderRadius.all(Radius.circular(6)),
+                            child: LinearProgressIndicator(minHeight: 8),
                           ),
                         ),
-                        if (_progressText != null) ...[
-                          const SizedBox(height: 6),
-                          Text('${(_progressValue * 100).round()}%',
-                              style: const TextStyle(
-                                  fontSize: 12, color: Colors.black54)),
-                        ],
                       ],
                     ),
                   ),
@@ -1652,8 +1642,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     if (_gridBusy) return;
     setState(() {
       _gridBusy = true;
-      _progressText = 'מתחיל זיהוי-רשת…';
-      _progressValue = 0.05;
+      _progressText = 'מתחיל זיהוי-רשת-קואורדינטות…';
     });
     var ticks = const <({Offset pixel, double e, double n, String crs})>[];
     try {
@@ -1662,12 +1651,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         ticks = await GridCoordService.autoDetectTicks(
           scan,
           onProgress: (status, frac) {
-            if (mounted) {
-              setState(() {
-                _progressText = status;
-                _progressValue = frac;
-              });
-            }
+            if (mounted) setState(() => _progressText = status);
           },
         );
       }
