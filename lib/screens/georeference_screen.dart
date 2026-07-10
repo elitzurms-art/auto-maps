@@ -90,10 +90,14 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   bool _autoCancelled = false; // המשתמש דילג/ביטל את הזיהוי
   // זיהוי-**רקע** (בטעינה) — לא-חוסם; אינדיקטור קטן בפינה. המשתמש עובד
   // במקביל, וכשנמצאת רשת מוצג/מוצע בלי שבזבזנו זמן על מפות בלי-רשת.
-  bool _autoRunning = false;
-  String? _autoStatus;
+  bool _autoRunning = false; // זיהוי-הרשת ברקע
   bool _autoClassicalRunning = false; // מנוע-הכבישים ברקע (במקביל לרשת)
-  bool _autoResultShown = false; // תוצאה אוטומטית כבר הוצעה (מונע כפילות)
+  bool _autoGridDone = false; // הרשת סיימה (עם/בלי תוצאה)
+  bool _autoRoadDone = false; // הכבישים סיימו
+  bool _autoOffered = false; // הבוחר כבר הוצג (מונע כפילות)
+  // תוצאות שני המנועים — ממתינים לשניהם ואז מציעים לבחור.
+  List<({Offset pixel, double e, double n, String crs})>? _autoGridResult;
+  List<GeminiAnchorSuggestion>? _autoRoadResult;
   String? _hintName; // שם-האזור שנגזר משם-הקובץ (לרמז המסלול-הקלאסי)
   img.Image? _scanImage; // התמונה המפוענחת (לחיתוך חלונות-OCR)
   // צלבי-רשת שנקראו: פיקסל + קואורדינטה מוקרנת (מטרים) + CRS.
@@ -158,16 +162,19 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     OcrService.available().then((ok) {
       if (!mounted) return;
       setState(() => _ocrAvailable = ok);
-      // ניסיון-זיהוי-רשת **אוטומטי בטעינה** (כמו רמז-השם) — אם יש רשת-
-      // קואורדינטות היא תזוהה ותוצג לאישור בלי שום פעולה; אחרת נשארים
-      // במצב-ידני בשקט. פעם אחת.
+      // מנוע-הרשת רץ **אוטומטית בטעינה** (במקביל למנוע-הכבישים). אם אין
+      // OCR — מסמנים את הרשת כ"סיימה" (בלי תוצאה) כדי שהבוחר עדיין יופיע
+      // עבור תוצאת-הכבישים.
       if (ok && !_autoTried) {
         _autoTried = true;
         _autoDetectGrid(silent: true);
+      } else if (!ok) {
+        _autoGridDone = true;
+        _maybeOfferAuto();
       }
     });
-    // רמז-מיקום משם-הקובץ — כדי שהדקירה הראשונה במצב-ידני תיפתח באזור הנכון.
-    _resolveFilenameHint();
+    // רמז-מיקום משם-הקובץ → ואז מנוע-הכבישים ברקע (או סימון "סיים" אם אין רמז).
+    _resolveFilenameHint().then((_) => _kickRoadEngine());
     // מעקב אחר הזזת-המפה — מעדכן את קריאת-הקואורדינטה ואת רשת-הקואורדינטות.
     _mapEventSub = _mapController.mapEventStream.listen((_) {
       if (!mounted) return;
@@ -362,9 +369,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
     if (name.length < 2) return;
-    _hintName = name; // לרמז המסלול-הקלאסי (Overpass) ברקע
-    // מנוע-הכבישים ברקע **במקביל** לזיהוי-הרשת — מה שמצליח קודם מוצע.
-    _autoClassicalMatch();
+    _hintName = name; // לרמז המסלול-הקלאסי (Overpass) — נצרך ב-_kickRoadEngine
     try {
       final uri = Uri.parse(
         'https://nominatim.openstreetmap.org/search'
@@ -1338,51 +1343,63 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
               ),
             ),
           ),
-        // אינדיקטור-רקע לא-חוסם (זיהוי אוטומטי בטעינה — רשת + כבישים
-        // במקביל) — המשתמש עובד ידנית במקביל.
+        // אינדיקטור-רקע לא-חוסם — **בר-אינסופי** שרץ עד ששני המנועים
+        // (רשת + כבישים) מסתיימים; אז מוצג הבוחר. המשתמש עובד ידנית במקביל,
+        // ו-× מבטל את ההצעה (נשארים ידני).
         if (_autoRunning || _autoClassicalRunning)
           Positioned(
             top: 8,
-            right: 56,
-            child: Material(
-              elevation: 3,
-              borderRadius: BorderRadius.circular(20),
-              color: Colors.teal.withValues(alpha: 0.92),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor:
-                            AlwaysStoppedAnimation<Color>(Colors.white),
-                      ),
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Material(
+                elevation: 3,
+                borderRadius: BorderRadius.circular(14),
+                color: Colors.teal.withValues(alpha: 0.94),
+                child: SizedBox(
+                  width: 250,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 8, 6, 10),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            const Expanded(
+                              child: Text(
+                                'מריץ התאמות אוטומטיות…',
+                                style: TextStyle(
+                                    color: Colors.white, fontSize: 13),
+                              ),
+                            ),
+                            InkWell(
+                              onTap: () => setState(() {
+                                _autoCancelled = true;
+                                _autoRunning = false;
+                                _autoClassicalRunning = false;
+                                _autoOffered = true; // מבטל את הבוחר — ידני
+                              }),
+                              child: const Padding(
+                                padding: EdgeInsets.all(4),
+                                child: Icon(Icons.close,
+                                    color: Colors.white, size: 16),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(3),
+                          child: const LinearProgressIndicator(
+                            minHeight: 3,
+                            backgroundColor: Colors.white24,
+                            valueColor:
+                                AlwaysStoppedAnimation<Color>(Colors.white),
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _autoStatus ??
-                          (_autoClassicalRunning
-                              ? 'מחפש עוגני-כבישים…'
-                              : 'מחפש רשת…'),
-                      style: const TextStyle(color: Colors.white, fontSize: 12),
-                    ),
-                    InkWell(
-                      onTap: () => setState(() {
-                        _autoCancelled = true;
-                        _autoRunning = false;
-                        _autoClassicalRunning = false;
-                        _autoStatus = null;
-                      }),
-                      child: const Padding(
-                        padding: EdgeInsets.all(4),
-                        child: Icon(Icons.close, color: Colors.white, size: 16),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -1719,7 +1736,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     setState(() {
       if (silent) {
         _autoRunning = true;
-        _autoStatus = 'מחפש רשת-קואורדינטות…';
       } else {
         _gridBusy = true;
         _progressText = 'מתחיל זיהוי-רשת-קואורדינטות…';
@@ -1733,13 +1749,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           scan,
           onProgress: (status, frac) {
             if (!mounted || _autoCancelled) return;
-            setState(() {
-              if (silent) {
-                _autoStatus = status;
-              } else {
-                _progressText = status;
-              }
-            });
+            // ברקע (silent) הבר קבוע-טקסט ("מריץ התאמות…"); רק במודל (⊞)
+            // מציגים את שלב-ההתקדמות.
+            if (!silent) setState(() => _progressText = status);
           },
         );
       }
@@ -1749,12 +1761,11 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       _gridBusy = false;
       _autoRunning = false;
       _progressText = null;
-      _autoStatus = null;
     });
     if (_autoCancelled) return;
-    if (ticks.length < 2) {
-      // לא נמצאה רשת. במפורש (⊞) — הודעה; ברקע (silent) — בשקט.
-      if (!silent) {
+    // הרצה **מפורשת** (⊞) → מציבים ומציגים מיד.
+    if (!silent) {
+      if (ticks.length < 2) {
         ScaffoldMessenger.of(context)
           ..clearSnackBars()
           ..showSnackBar(const SnackBar(
@@ -1762,28 +1773,87 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                 'או נעץ נקודות ידנית.'),
             duration: Duration(seconds: 4),
           ));
+        return;
       }
-      return;
-    }
-    // נמצאה רשת. הרצה **מפורשת** (⊞) → מציבים ומציגים מיד. **רקע** (silent)
-    // → מציעים בסנאקבר עם כפתור (לא דורסים עבודה ידנית), אלא-אם כבר הוצעה
-    // תוצאה אוטומטית אחרת.
-    if (!silent) {
       _applyGridTicks(ticks);
       return;
     }
-    if (_autoResultShown) return;
-    _autoResultShown = true;
-    ScaffoldMessenger.of(context)
-      ..clearSnackBars()
-      ..showSnackBar(SnackBar(
-        content: Text('זוהתה רשת-קואורדינטות (${ticks.length} נקודות)!'),
-        duration: const Duration(seconds: 10),
-        action: SnackBarAction(
-          label: 'הצג ואשר',
-          onPressed: () => _applyGridTicks(ticks),
+    // **רקע** — שומרים את התוצאה וממתינים גם למנוע-הכבישים; הבוחר יוצג
+    // כששניהם סיימו (`_maybeOfferAuto`).
+    _autoGridDone = true;
+    if (ticks.length >= 2) _autoGridResult = ticks;
+    _maybeOfferAuto();
+  }
+
+  /// נקרא בסיום כל מנוע-רקע. מציג את **הבוחר** רק כששני המנועים סיימו
+  /// (רשת + כבישים) ולפחות אחד מצא תוצאה. לא מפריע אם המשתמש כבר עובד
+  /// ידנית — אז רק סנאקבר עדין שממנו אפשר לפתוח את הבוחר.
+  void _maybeOfferAuto() {
+    if (!_autoGridDone || !_autoRoadDone) return;
+    if (_autoOffered || !mounted) return;
+    if (_autoGridResult == null && _autoRoadResult == null) return;
+    _autoOffered = true;
+    if (_points.isNotEmpty) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(
+          content: const Text('התאמות אוטומטיות מוכנות'),
+          duration: const Duration(seconds: 10),
+          action: SnackBarAction(
+              label: 'הצג', onPressed: _showAutoChooser),
+        ));
+      return;
+    }
+    _showAutoChooser();
+  }
+
+  /// דיאלוג-בחירה בין תוצאות שני המנועים (מה שנמצא) — או "המשך ידני".
+  Future<void> _showAutoChooser() async {
+    final grid = _autoGridResult;
+    final road = _autoRoadResult;
+    if (grid == null && road == null) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true, // הקשה בחוץ = המשך ידני
+      builder: (ctx) => AlertDialog(
+        title: const Text('התאמות אוטומטיות'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('נמצאו האפשרויות הבאות. בחר אחת לתצוגה-מקדימה, '
+                'או המשך ידנית בכל שלב.'),
+            const SizedBox(height: 16),
+            if (grid != null)
+              FilledButton.icon(
+                icon: const Icon(Icons.grid_on),
+                label: Text('רשת-קואורדינטות (${grid.length} נקודות)'),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _applyGridTicks(grid);
+                },
+              ),
+            if (grid != null && road != null) const SizedBox(height: 8),
+            if (road != null)
+              FilledButton.icon(
+                icon: const Icon(Icons.alt_route),
+                label: Text('עוגני-כבישים '
+                    '(${road.where((s) => s.verified != false).length})'),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _openAdjustVerify(road);
+                },
+              ),
+          ],
         ),
-      ));
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('המשך ידני'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// מציב את נקודות-הבקרה מצלבי-הרשת, מסנתז נקודה-3 ומחשב → תצוגה-מקדימה.
@@ -1803,39 +1873,52 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     _calculate();
   }
 
-  /// **מנוע-הכבישים ברקע** — במקביל לזיהוי-הרשת. מריץ את המסלול-הקלאסי
-  /// (Overpass+RANSAC) עם רמז-שם-הקובץ, ואם מצא עוגנים — מציע בסנאקבר
-  /// (בלי לחסום). מה שמצליח קודם (רשת/כבישים) מוצע; השני נדחה.
+  /// מפעיל את מנוע-הכבישים ברקע אם יש רמז-שם; אחרת מסמן אותו כ"סיים" (בלי
+  /// תוצאה) כדי שהבוחר עדיין יופיע עבור תוצאת-הרשת.
+  void _kickRoadEngine() {
+    if (!mounted) return;
+    if (_hintName == null) {
+      _autoRoadDone = true;
+      _maybeOfferAuto();
+      return;
+    }
+    _autoClassicalMatch();
+  }
+
+  /// **מנוע-הכבישים ברקע** — במקביל לזיהוי-הרשת. קורא קודם את **חץ-הצפון**
+  /// (כמו ב-✨ הידני) ומעביר אותו למסלול-הקלאסי (Overpass+RANSAC) עם
+  /// רמז-שם-הקובץ. שומר את התוצאה וממתין לשני המנועים (`_maybeOfferAuto`).
   Future<void> _autoClassicalMatch() async {
     if (_hintName == null || _autoClassicalRunning) return;
     if (_imageWidth == 0) await _loadImageSize();
     if (!mounted || _imageWidth == 0) return;
     setState(() => _autoClassicalRunning = true);
     try {
+      // זיהוי-מצפן קלאסי (כמו בדיאלוג ✨) — מחזק את ההתאמה למפות מוטות.
+      final compass =
+          await GeminiAnchorService().detectCompass(imagePath: widget.imagePath);
+      if (!mounted) return;
       final suggestions = await GeminiAnchorService().suggestAnchors(
         imagePath: widget.imagePath,
         imageWidth: _imageWidth,
         imageHeight: _imageHeight,
         areaHint: _hintName,
         northUp: true, // בערך-צפון ±20° (רוב מפות-היישוב)
+        compassDeg: compass?.deg,
+        compassResolved: compass?.resolved ?? false,
       );
       if (!mounted) return;
       final usable = suggestions.where((s) => s.verified != false).toList();
-      if (usable.length < 3 || _autoResultShown || _points.isNotEmpty) return;
-      _autoResultShown = true;
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(SnackBar(
-          content: Text('זוהו עוגני-כבישים אוטומטית (${usable.length})!'),
-          duration: const Duration(seconds: 10),
-          action: SnackBarAction(
-            label: 'פתח לאישור',
-            onPressed: () => _openAdjustVerify(suggestions),
-          ),
-        ));
+      if (usable.length >= 3) _autoRoadResult = suggestions;
     } catch (_) {
     } finally {
-      if (mounted) setState(() => _autoClassicalRunning = false);
+      if (mounted) {
+        setState(() {
+          _autoClassicalRunning = false;
+          _autoRoadDone = true;
+        });
+        _maybeOfferAuto();
+      }
     }
   }
 
