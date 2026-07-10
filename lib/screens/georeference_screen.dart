@@ -1003,19 +1003,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                     style: TextStyle(fontSize: 15),
                   ),
                   const SizedBox(height: 24),
-                  // עבודה ידנית — **תמיד** (גם בהתחלה).
-                  FilledButton.icon(
-                    icon: const Icon(Icons.back_hand_outlined),
-                    label: Text(saved != null && saved.isNotEmpty
-                        ? 'חזרה לעבודה ידנית (${saved.length} נקודות)'
-                        : 'עבודה ידנית'),
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                    ),
-                    onPressed: _chooseManual,
-                  ),
+                  // תוצאות אוטומטיות ראשונות (רשת/כבישים), והידני **אחרון**.
                   if (grid != null) ...[
-                    const SizedBox(height: 12),
                     FilledButton.icon(
                       icon: const Icon(Icons.grid_on),
                       label:
@@ -1029,9 +1018,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                         _applyGridTicks(grid);
                       },
                     ),
+                    const SizedBox(height: 12),
                   ],
                   if (road != null) ...[
-                    const SizedBox(height: 12),
                     FilledButton.icon(
                       icon: const Icon(Icons.alt_route),
                       label: Text('עוגני-כבישים '
@@ -1045,7 +1034,19 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                         _openAdjustVerify(road);
                       },
                     ),
+                    const SizedBox(height: 12),
                   ],
+                  // עבודה ידנית — **תמיד** (גם בהתחלה), ותמיד אחרונה.
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.back_hand_outlined),
+                    label: Text(saved != null && saved.isNotEmpty
+                        ? 'חזרה לעבודה ידנית (${saved.length} נקודות)'
+                        : 'עבודה ידנית'),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                    ),
+                    onPressed: _chooseManual,
+                  ),
                   const SizedBox(height: 24),
                   if (running)
                     Column(
