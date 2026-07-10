@@ -84,10 +84,14 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   bool _gridMode = false;
   bool _ocrAvailable = false;
   bool _gridBusy = false;
-  // טקסט-שלב בזמן OCR של זיהוי-הרשת (הפס עצמו אנימציה).
+  // טקסט-שלב בזמן OCR **מפורש** (⊞) — חלון-חוסם עם פס-אנימציה.
   String? _progressText;
   bool _autoTried = false; // ניסיון-אוטומטי בטעינה — פעם אחת
-  bool _autoCancelled = false; // המשתמש דילג על הזיהוי-האוטומטי
+  bool _autoCancelled = false; // המשתמש דילג/ביטל את הזיהוי
+  // זיהוי-**רקע** (בטעינה) — לא-חוסם; אינדיקטור קטן בפינה. המשתמש עובד
+  // במקביל, וכשנמצאת רשת מוצג/מוצע בלי שבזבזנו זמן על מפות בלי-רשת.
+  bool _autoRunning = false;
+  String? _autoStatus;
   img.Image? _scanImage; // התמונה המפוענחת (לחיתוך חלונות-OCR)
   // צלבי-רשת שנקראו: פיקסל + קואורדינטה מוקרנת (מטרים) + CRS.
   final List<({Offset pixel, double e, double n, String crs})> _gridTicks = [];
@@ -1328,6 +1332,50 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
               ),
             ),
           ),
+        // אינדיקטור-רקע לא-חוסם (זיהוי-רשת בטעינה) — המשתמש עובד במקביל.
+        if (_autoRunning)
+          Positioned(
+            top: 8,
+            right: 56,
+            child: Material(
+              elevation: 3,
+              borderRadius: BorderRadius.circular(20),
+              color: Colors.teal.withValues(alpha: 0.92),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor:
+                            AlwaysStoppedAnimation<Color>(Colors.white),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _autoStatus ?? 'מחפש רשת…',
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                    ),
+                    InkWell(
+                      onTap: () => setState(() {
+                        _autoCancelled = true;
+                        _autoRunning = false;
+                        _autoStatus = null;
+                      }),
+                      child: const Padding(
+                        padding: EdgeInsets.all(4),
+                        child: Icon(Icons.close, color: Colors.white, size: 16),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         // תצוגה מקדימה
         if (_result != null) _buildPreviewOverlay(),
       ],
@@ -1650,12 +1698,21 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   /// **זיהוי-רשת אוטומטי** — מריץ OCR מלא, מזהה ומזווג את תוויות-הקואורדינטה
   /// לבד, מציב את נקודות-הבקרה, מחשב ומציג תצוגה-מקדימה. נכשל → הודעה
   /// והמשתמש יכול להקיש ידנית.
+  ///
+  /// [silent] (טעינה-אוטומטית) → **לא-חוסם**: אינדיקטור קטן בפינה, המשתמש
+  /// עובד במקביל, וכשנמצאת רשת (ולא התחיל ידנית) — מוצגת התצוגה-המקדימה.
+  /// מפורש (⊞) → חלון-חוסם עם פס. מפה בלי-רשת → בשקט, בלי בזבוז-הפרעה.
   Future<void> _autoDetectGrid({bool silent = false}) async {
-    if (_gridBusy) return;
+    if (_gridBusy || _autoRunning) return;
     _autoCancelled = false;
     setState(() {
-      _gridBusy = true;
-      _progressText = 'מתחיל זיהוי-רשת-קואורדינטות…';
+      if (silent) {
+        _autoRunning = true;
+        _autoStatus = 'מחפש רשת-קואורדינטות…';
+      } else {
+        _gridBusy = true;
+        _progressText = 'מתחיל זיהוי-רשת-קואורדינטות…';
+      }
     });
     var ticks = const <({Offset pixel, double e, double n, String crs})>[];
     try {
@@ -1664,9 +1721,14 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         ticks = await GridCoordService.autoDetectTicks(
           scan,
           onProgress: (status, frac) {
-            if (mounted && !_autoCancelled) {
-              setState(() => _progressText = status);
-            }
+            if (!mounted || _autoCancelled) return;
+            setState(() {
+              if (silent) {
+                _autoStatus = status;
+              } else {
+                _progressText = status;
+              }
+            });
           },
         );
       }
@@ -1674,32 +1736,33 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     if (!mounted) return;
     setState(() {
       _gridBusy = false;
+      _autoRunning = false;
       _progressText = null;
+      _autoStatus = null;
     });
-    // המשתמש דילג — לא דורסים עבודה ידנית. אם בכל-זאת נמצאה רשת ואין
-    // עדיין נקודות, מציעים בעדינות דרך snackbar (לחיצה על ⊞ תריץ שוב).
-    if (_autoCancelled) {
-      if (ticks.length >= 2 && _points.isEmpty) {
+    if (_autoCancelled) return;
+    if (ticks.length < 2) {
+      // לא נמצאה רשת. במפורש (⊞) — הודעה; ברקע (silent) — בשקט.
+      if (!silent) {
         ScaffoldMessenger.of(context)
           ..clearSnackBars()
           ..showSnackBar(const SnackBar(
-            content: Text('זוהתה רשת-קואורדינטות ברקע — לחץ ⊞ להצגתה.'),
+            content: Text('לא זוהתה רשת — הקש ידנית על 2 צלבי-רשת (⊞), '
+                'או נעץ נקודות ידנית.'),
             duration: Duration(seconds: 4),
           ));
       }
       return;
     }
-    if (ticks.length < 2) {
-      // בטעינה-אוטומטית (silent) — בלי הודעה מפריעה; פשוט נשארים במצב-ידני.
-      if (!silent) {
-        ScaffoldMessenger.of(context)
-          ..clearSnackBars()
-          ..showSnackBar(const SnackBar(
-            content: Text('לא זוהתה רשת אוטומטית — הקש ידנית על 2 צלבי-רשת '
-                '(כפתור-הרשת ⊞), או נעץ נקודות ידנית.'),
-            duration: Duration(seconds: 4),
-          ));
-      }
+    // נמצאה רשת. אם המשתמש כבר התחיל לנעוץ ידנית (silent) — לא דורסים,
+    // מציעים בעדינות. אחרת מציבים ומציגים תצוגה-מקדימה.
+    if (silent && _points.isNotEmpty) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(
+          content: Text('זוהתה רשת-קואורדינטות ברקע — לחץ ⊞ להצגתה.'),
+          duration: Duration(seconds: 5),
+        ));
       return;
     }
     setState(() {
