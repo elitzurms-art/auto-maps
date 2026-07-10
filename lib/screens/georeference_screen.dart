@@ -95,9 +95,14 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   bool _autoGridDone = false; // הרשת סיימה (עם/בלי תוצאה)
   bool _autoRoadDone = false; // הכבישים סיימו
   bool _autoOffered = false; // הבוחר כבר הוצג (מונע כפילות)
-  // תוצאות שני המנועים — ממתינים לשניהם ואז מציעים לבחור.
+  // תוצאות שני המנועים — נשמרות **לצמיתות** כדי שאפשר יהיה לעבור ביניהן
+  // (ולחזור לידני) דרך כפתור-הבוחר הקבוע, גם אחרי שבחרנו אחת.
   List<({Offset pixel, double e, double n, String crs})>? _autoGridResult;
   List<GeminiAnchorSuggestion>? _autoRoadResult;
+  // צילום העבודה-הידנית האחרונה לפני החלת אפשרות אוטומטית — לשחזור "חזרה
+  // לידני". `_pointsAreAuto` מבחין בין נקודות-ידניות לנקודות-מאפשרות-אוטו.
+  List<_ControlPoint>? _savedManualPoints;
+  bool _pointsAreAuto = false;
   String? _hintName; // שם-האזור שנגזר משם-הקובץ (לרמז המסלול-הקלאסי)
   img.Image? _scanImage; // התמונה המפוענחת (לחיתוך חלונות-OCR)
   // צלבי-רשת שנקראו: פיקסל + קואורדינטה מוקרנת (מטרים) + CRS.
@@ -406,6 +411,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       }
       _isOnMap = true;
       _result = null;
+      _pointsAreAuto = false; // עריכה-ידנית — הנקודות שוב "ידניות"
     });
   }
 
@@ -416,6 +422,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       _isOnMap = false;
       _editingIndex = null;
       _result = null;
+      _pointsAreAuto = false;
     });
   }
 
@@ -984,6 +991,14 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         appBar: AppBar(
           title: Text('ג\'יאורפרנס ($_completeCount / $_minPoints נקודות)'),
           actions: [
+            // כפתור-בוחר קבוע — פותח מחדש את בחירת-ההתאמה (רשת/כבישים/ידני)
+            // כל עוד יש תוצאה-אוטומטית שמורה. מאפשר לעבור ביניהן בכל עת.
+            if (_autoGridResult != null || _autoRoadResult != null)
+              IconButton(
+                icon: const Icon(Icons.auto_fix_high),
+                tooltip: 'התאמות אוטומטיות (החלף מקור)',
+                onPressed: _showAutoChooser,
+              ),
             // מצב אוטומטי — הצעת עוגנים מ-Gemini עם אישור פר-נקודה
             _aiBusy
                 ? const Padding(
@@ -1807,22 +1822,25 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     _showAutoChooser();
   }
 
-  /// דיאלוג-בחירה בין תוצאות שני המנועים (מה שנמצא) — או "המשך ידני".
+  /// דיאלוג-בחירה בין תוצאות שני המנועים (נשמרות לצמיתות) — אפשר לעבור
+  /// ביניהן בכל עת, ולחזור לעבודה-הידנית שנשמרה. נפתח אוטומטית כששניהם
+  /// סיימו, וגם ידנית דרך הכפתור הקבוע בסרגל.
   Future<void> _showAutoChooser() async {
     final grid = _autoGridResult;
     final road = _autoRoadResult;
+    final saved = _savedManualPoints; // צולם בהחלת-האפשרות (ראה _captureManualBeforeAuto)
     if (grid == null && road == null) return;
     await showDialog<void>(
       context: context,
-      barrierDismissible: true, // הקשה בחוץ = המשך ידני
+      barrierDismissible: true,
       builder: (ctx) => AlertDialog(
-        title: const Text('התאמות אוטומטיות'),
+        title: const Text('בחירת התאמה'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('נמצאו האפשרויות הבאות. בחר אחת לתצוגה-מקדימה, '
-                'או המשך ידנית בכל שלב.'),
+            const Text('בחר מקור-התאמה. אפשר לעבור ביניהם ולחזור לידני '
+                'בכל עת מהכפתור בסרגל העליון.'),
             const SizedBox(height: 16),
             if (grid != null)
               FilledButton.icon(
@@ -1844,21 +1862,65 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                   _openAdjustVerify(road);
                 },
               ),
+            if (saved != null && saved.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.back_hand_outlined),
+                label: Text('חזרה לנקודות הידניות (${saved.length})'),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _restoreManualPoints();
+                },
+              ),
+            ],
           ],
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('המשך ידני'),
+            child: const Text('סגור'),
           ),
         ],
       ),
     );
   }
 
+  /// משחזר את הנקודות-הידניות שצולמו לפני החלת האפשרות האוטומטית.
+  void _restoreManualPoints() {
+    final saved = _savedManualPoints;
+    if (saved == null) return;
+    setState(() {
+      _points
+        ..clear()
+        ..addAll([
+          for (final pt in saved) _ControlPoint(pixel: pt.pixel)..world = pt.world,
+        ]);
+      _gridTicks.clear();
+      _suggestions = [];
+      _isOnMap = false;
+      _result = null;
+      _pointsAreAuto = false; // חזרנו לידני
+    });
+    if (_points.where((p) => p.isComplete).length >= 3) _calculate();
+  }
+
+  /// לפני שהחלת אפשרות אוטומטית דורסת את הנקודות — מצלמת את העבודה-הידנית
+  /// האחרונה (רק אם הנקודות הנוכחיות ידניות, לא אפשרות-אוטו קודמת), כדי
+  /// שאפשר יהיה לחזור אליה. מעברי אוטו→אוטו לא דורסים את הצילום.
+  void _captureManualBeforeAuto() {
+    if (!_pointsAreAuto) {
+      _savedManualPoints = [
+        for (final pt in _points)
+          _ControlPoint(pixel: pt.pixel)..world = pt.world,
+      ];
+    }
+    _pointsAreAuto = true;
+  }
+
   /// מציב את נקודות-הבקרה מצלבי-הרשת, מסנתז נקודה-3 ומחשב → תצוגה-מקדימה.
   void _applyGridTicks(
       List<({Offset pixel, double e, double n, String crs})> ticks) {
+    _captureManualBeforeAuto();
     setState(() {
       _points.clear();
       _gridTicks.clear();
@@ -1938,6 +2000,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       ),
     );
     if (!mounted || approved == null || approved.length < 3) return;
+    _captureManualBeforeAuto();
     setState(() {
       _points
         ..clear()
@@ -1949,8 +2012,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       _isOnMap = false;
       _result = null;
     });
+    // לא מאשרים-ויוצאים אוטומטית (בשונה מ-✨ הידני) — מציגים תצוגה-מקדימה
+    // ונשארים במסך, כדי שאפשר יהיה לעבור לרשת/לידני מכפתור-הבוחר.
     _calculate();
-    if (_result != null) await _confirm();
   }
 
   // ═══ מצב מפה ═══
