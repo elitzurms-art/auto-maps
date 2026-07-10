@@ -102,6 +102,23 @@ if(EXISTS "${OSGEO4W_ROOT}/bin/sqlite3.dll")
     COMPONENT Runtime)
 endif()
 
+# Tesseract OCR runtime (לאיתור-רשת-קואורדינטות אוטומטי / קריאת תוויות ITM/
+# UTM) — מצורף מהתקנת UB-Mannheim בזמן-בנייה (build-dep, כמו OSGeo4W ל-GDAL,
+# לא committed). מועתק ל-tesseract/ ליד ה-exe; OcrService מחפש אותו שם
+# ראשון ומעביר --tessdata-dir. eng+osd מספיקים (ספרות + orientation).
+set(TESSERACT_ROOT "C:/Program Files/Tesseract-OCR"
+  CACHE PATH "Tesseract install (build-dep)")
+if(EXISTS "${TESSERACT_ROOT}/tesseract.exe")
+  install(DIRECTORY "${TESSERACT_ROOT}/"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/tesseract"
+    COMPONENT Runtime
+    FILES_MATCHING
+      PATTERN "*.exe"
+      PATTERN "*.dll"
+      PATTERN "eng.traineddata"
+      PATTERN "osd.traineddata")
+endif()
+
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"

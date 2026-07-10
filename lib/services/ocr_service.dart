@@ -9,12 +9,24 @@ import 'dart:io';
 class OcrService {
   static String? _cached;
   static bool _resolved = false;
+  static String? _tessdataDir; // כשמשתמשים ב-Tesseract המצורף
 
-  /// נתיב ל-tesseract.exe (מותקן/מצורף) או null אם לא נמצא.
+  /// נתיב ל-tesseract.exe. סדר-עדיפות: **מצורף ליד ה-exe** (`tesseract/`,
+  /// עצמאי — בלי התקנה) → מותקן (Program Files) → PATH. null אם לא נמצא.
   static Future<String?> tesseractPath() async {
     if (_resolved) return _cached;
     _resolved = true;
     if (Platform.isWindows) {
+      // 1) מצורף ליד ה-exe (bundle) — עצמאי.
+      final exeDir = File(Platform.resolvedExecutable).parent.path;
+      final bundled = '$exeDir\\tesseract\\tesseract.exe';
+      if (File(bundled).existsSync()) {
+        _cached = bundled;
+        final td = '$exeDir\\tesseract\\tessdata';
+        if (Directory(td).existsSync()) _tessdataDir = td;
+        return bundled;
+      }
+      // 2) מותקן.
       const candidates = [
         r'C:\Program Files\Tesseract-OCR\tesseract.exe',
         r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
@@ -26,7 +38,7 @@ class OcrService {
         }
       }
     }
-    // חיפוש ב-PATH.
+    // 3) חיפוש ב-PATH.
     try {
       final r = await Process.run(
           Platform.isWindows ? 'where' : 'which', ['tesseract']);
@@ -40,6 +52,11 @@ class OcrService {
     } catch (_) {}
     return null;
   }
+
+  /// ארגומנטי-בסיס: כשמשתמשים ב-Tesseract המצורף מעבירים --tessdata-dir
+  /// (אין TESSDATA_PREFIX במערכת).
+  static List<String> _tessdataArgs() =>
+      _tessdataDir == null ? const [] : ['--tessdata-dir', _tessdataDir!];
 
   static Future<bool> available() async => (await tesseractPath()) != null;
 
@@ -56,6 +73,7 @@ class OcrService {
       final r = await Process.run(t, [
         imagePath,
         out,
+        ..._tessdataArgs(),
         '--psm',
         '$psm',
         '-c',
@@ -89,6 +107,7 @@ class OcrService {
       final r = await Process.run(t, [
         imagePath,
         'stdout',
+        ..._tessdataArgs(),
         '--psm',
         '$psm',
         '-c',
