@@ -141,8 +141,13 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     // גילוי אוטומטי של קבצי-מפה בתיקיית-הייחוס המשתמעת (reference_maps).
     _refMap.loadDefaultFolder();
     // זמינות-OCR (Tesseract) — קובעת אם להציע את מצב רשת-הקואורדינטות.
-    OcrService.available().then((ok) {
+    OcrService.available().then((ok) async {
       if (mounted) setState(() => _ocrAvailable = ok);
+      try {
+        File('${Directory.systemTemp.path}/auto_maps_grid.log').writeAsStringSync(
+            'init: ocrAvailable=$ok tess=${await OcrService.tesseractPath()}\n',
+            mode: FileMode.append);
+      } catch (_) {}
     });
     // רמז-מיקום משם-הקובץ — כדי שהדקירה הראשונה במצב-ידני תיפתח באזור הנכון.
     _resolveFilenameHint();
@@ -1226,8 +1231,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                     _gridMode = turningOn;
                     if (turningOn) _crosshairMode = false;
                   });
-                  // הדלקה + אין נקודות → ניסיון זיהוי-רשת אוטומטי.
-                  if (turningOn && _points.isEmpty) _autoDetectGrid();
+                  // הדלקה → ניסיון זיהוי-רשת אוטומטי (מנקה נקודות קודמות).
+                  if (turningOn) _autoDetectGrid();
                 },
                 child: SizedBox(
                   width: 40,
@@ -1552,9 +1557,20 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     if (_gridBusy) return;
     setState(() => _gridBusy = true);
     var ticks = const <({Offset pixel, double e, double n, String crs})>[];
+    var dbg = '';
     try {
       final scan = await _ensureScanImage();
+      dbg = 'scan=${scan == null ? "null" : "${scan.width}x${scan.height}"} '
+          'ocr=${await OcrService.available()} '
+          'tess=${await OcrService.tesseractPath()}';
       if (scan != null) ticks = await GridCoordService.autoDetectTicks(scan);
+      dbg += ' ticks=${ticks.length}';
+    } catch (e, st) {
+      dbg += ' EXC=$e | ${st.toString().split('\n').take(2).join(" ")}';
+    }
+    try {
+      File('${Directory.systemTemp.path}/auto_maps_grid.log')
+          .writeAsStringSync('$dbg\n', mode: FileMode.append);
     } catch (_) {}
     if (!mounted) return;
     setState(() => _gridBusy = false);

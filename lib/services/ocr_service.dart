@@ -70,6 +70,9 @@ class OcrService {
     if (t == null) return const [];
     final out = '${Directory.systemTemp.path}/_amtsv';
     try {
+      // ⚠️ TSV דרך המשתנה tessedit_create_tsv=1 ולא דרך קונפיג-הקובץ 'tsv'
+      // — ה-Tesseract המצורף לא כולל את tessdata/configs/tsv (הועתק רק
+      // traineddata), אז הקונפיג 'tsv' לא נמצא והקובץ לא נוצר.
       final r = await Process.run(t, [
         imagePath,
         out,
@@ -78,7 +81,8 @@ class OcrService {
         '$psm',
         '-c',
         'tessedit_char_whitelist=0123456789,',
-        'tsv',
+        '-c',
+        'tessedit_create_tsv=1',
       ]);
       if (r.exitCode != 0) return const [];
       final res = <({String text, double cx, double cy})>[];
