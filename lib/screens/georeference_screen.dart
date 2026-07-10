@@ -91,6 +91,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   // במקביל, וכשנמצאת רשת מוצג/מוצע בלי שבזבזנו זמן על מפות בלי-רשת.
   bool _autoRunning = false; // זיהוי-הרשת ברקע
   bool _autoClassicalRunning = false; // מנוע-הכבישים ברקע (במקביל לרשת)
+  String? _gridStage; // שלב-נוכחי של מנוע-הרשת (לאבחון תקיעות)
+  String? _roadStage; // שלב-נוכחי של מנוע-הכבישים
   bool _autoGridDone = false; // הרשת סיימה (עם/בלי תוצאה)
   bool _autoRoadDone = false; // הכבישים סיימו
   bool _autoOffered = false; // הבוחר כבר הוצג (מונע כפילות)
@@ -1053,6 +1055,13 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                       children: [
                         const Text('מריץ התאמות אוטומטיות…',
                             style: TextStyle(color: Colors.teal)),
+                        if (_autoStageLines().isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          Text(_autoStageLines(),
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                  color: Colors.grey, fontSize: 12)),
+                        ],
                         const SizedBox(height: 8),
                         ClipRRect(
                           borderRadius: BorderRadius.circular(3),
@@ -1349,6 +1358,16 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                             ),
                           ],
                         ),
+                        // חיווי-שלב פר-מנוע (לאבחון תקיעות — רואים איפה תקוע).
+                        if (_autoStageLines().isNotEmpty)
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: Text(
+                              _autoStageLines(),
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 10),
+                            ),
+                          ),
                         const SizedBox(height: 6),
                         ClipRRect(
                           borderRadius: BorderRadius.circular(3),
@@ -1696,6 +1715,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     if (_gridBusy || _autoRunning) return;
     _autoCancelled = false;
     setState(() {
+      _gridStage = 'מתחיל…';
       if (silent) {
         _autoRunning = true;
       } else {
@@ -1713,9 +1733,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           scan,
           onProgress: (status, frac) {
             if (!mounted || _autoCancelled) return;
-            // ברקע (silent) הבר קבוע-טקסט ("מריץ התאמות…"); רק במודל (⊞)
-            // מציגים את שלב-ההתקדמות.
-            if (!silent) setState(() => _progressText = status);
+            setState(() {
+              _gridStage = status; // לאבחון — מוצג בבר-הרקע
+              if (!silent) _progressText = status;
+            });
           },
         ).timeout(
           Duration(seconds: silent ? 45 : 90),
@@ -1729,6 +1750,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       _gridBusy = false;
       _autoRunning = false;
       _progressText = null;
+      _gridStage = null;
     });
     if (_autoCancelled) return;
     // הרצה **מפורשת** (⊞) → מציבים ומציגים מיד.
@@ -1773,6 +1795,14 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       return;
     }
     setState(() => _showChooser = true);
+  }
+
+  /// טקסט-אבחון: השלב-הנוכחי של כל מנוע-רקע פעיל (לזיהוי איפה נתקע).
+  String _autoStageLines() {
+    final lines = <String>[];
+    if (_autoRunning) lines.add('רשת: ${_gridStage ?? '…'}');
+    if (_autoClassicalRunning) lines.add('כבישים: ${_roadStage ?? '…'}');
+    return lines.join('\n');
   }
 
   /// משחזר את הנקודות-הידניות שצולמו לפני החלת האפשרות האוטומטית.
@@ -1844,11 +1874,13 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     if (_hintName == null || _autoClassicalRunning) return;
     if (_imageWidth == 0) await _loadImageSize();
     if (!mounted || _imageWidth == 0) return;
-    setState(() => _autoClassicalRunning = true);
+    setState(() {
+      _autoClassicalRunning = true;
+      _roadStage = 'קורא חץ-צפון…';
+    });
     try {
-      // זיהוי-מצפן קלאסי (מחזק את המסלול-הישיר). suggestAnchors מנסה עכשiv
-      // **את כל אסטרטגיות-הכיוון בקריאה אחת** (ישיר + deskew-לכל-הזוויות)
-      // ובוחר את הטובה לפי-איכות — אין צורך בקריאה שנייה.
+      // suggestAnchors מנסה את כל אסטרטגיות-הכיוון בקריאה אחת (ישיר +
+      // deskew-לכל-הזוויות) ובוחר את הטובה לפי-איכות.
       // ⚠️ timeout קשיח — Overpass יכול לתקוע עד 75ש', וזיהוי-כפול
       // (ישיר+deskew) כבד. גבול-עליון כדי שהבר לא ייתקע; חריגה ⇒ בלי תוצאה.
       final compass = await GeminiAnchorService()
@@ -1863,6 +1895,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             areaHint: _hintName,
             compassDeg: compass?.deg,
             compassResolved: compass?.resolved ?? false,
+            onStatus: (s) {
+              if (mounted) setState(() => _roadStage = s);
+            },
           )
           .timeout(const Duration(seconds: 50), onTimeout: () => const []);
       if (!mounted) return;
@@ -1874,6 +1909,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         setState(() {
           _autoClassicalRunning = false;
           _autoRoadDone = true;
+          _roadStage = null;
         });
         _maybeOfferAuto();
       }
