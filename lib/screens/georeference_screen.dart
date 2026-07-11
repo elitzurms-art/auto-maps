@@ -147,6 +147,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   LatLng? _hintCenter;
   // מנוי לאירועי-המפה (הזזה) — מבוטל ב-dispose.
   StreamSubscription? _mapEventSub;
+  // שדה-תיקון שם-אזור ב-hub (רשת-ביטחון כשהג'יאוקוד-משם-הקובץ נכשל).
+  final TextEditingController _areaController = TextEditingController();
 
   // תוצאה
   WorldFileResult? _result;
@@ -202,6 +204,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     _refMap.removeListener(_onRefMapChanged);
     _mapEventSub?.cancel();
     _transformController.dispose();
+    _areaController.dispose();
     super.dispose();
   }
 
@@ -375,8 +378,11 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         .replaceAll(RegExp(r'[_\-]+'), ' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
+    debugPrint('[AUTO] filenameHint cleaned="$name" '
+        'from="${p.basenameWithoutExtension(widget.imagePath)}"');
     if (name.length < 2) return;
     _hintName = name; // לרמז המסלול-הקלאסי (Overpass) — נצרך ב-_kickRoadEngine
+    if (_areaController.text.isEmpty) _areaController.text = name; // ל-hub
     try {
       final uri = Uri.parse(
         'https://nominatim.openstreetmap.org/search'
@@ -1084,6 +1090,39 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                               style: TextStyle(color: Colors.grey, fontSize: 12)),
                       ],
                     ),
+                  // רשת-ביטחון: כשמנוע-הכבישים לא מצא (רמז שגוי/חסר), אפשר
+                  // להקליד שם-יישוב ולהריץ מחדש. (שטח-פתוח בלי כבישים → גריד/ידני.)
+                  if (!running && road == null && _autoRoadDone) ...[
+                    const SizedBox(height: 20),
+                    const Divider(),
+                    const SizedBox(height: 8),
+                    const Text('לא נמצאו כבישים — נסה שם-יישוב:',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 13)),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _areaController,
+                            textAlign: TextAlign.right,
+                            decoration: const InputDecoration(
+                              hintText: 'שם היישוב',
+                              isDense: true,
+                              border: OutlineInputBorder(),
+                            ),
+                            onSubmitted: (_) => _rerunRoad(),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        FilledButton.icon(
+                          icon: const Icon(Icons.search),
+                          label: const Text('חפש כבישים'),
+                          onPressed: _rerunRoad,
+                        ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -1773,6 +1812,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     }
     // **רקע** — שומרים את התוצאה וממתינים גם למנוע-הכבישים; הבוחר יוצג
     // כששניהם סיימו (`_maybeOfferAuto`).
+    debugPrint('[AUTO] grid done: ticks=${ticks.length}');
     _autoGridDone = true;
     if (ticks.length >= 2) _autoGridResult = ticks;
     _maybeOfferAuto();
@@ -1782,6 +1822,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   /// אם המשתמש עדיין לא נעץ ידנית — פותח מיד את מסך-הבחירה; אם כבר עובד
   /// ידנית — סנאקבר עדין 'הצג' (כפתור-החזור תמיד יחזיר לבוחר ממילא).
   void _maybeOfferAuto() {
+    debugPrint('[AUTO] maybeOffer gridDone=$_autoGridDone roadDone=$_autoRoadDone '
+        'offered=$_autoOffered grid=${_autoGridResult != null} '
+        'road=${_autoRoadResult != null}');
     if (!_autoGridDone || !_autoRoadDone) return;
     if (_autoOffered || !mounted) return;
     if (_autoGridResult == null && _autoRoadResult == null) return;
@@ -1858,10 +1901,25 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     _calculate();
   }
 
+  /// הרצה-חוזרת של מנוע-הכבישים עם שם-אזור שהמשתמש הקליד ב-hub (רשת-ביטחון
+  /// כשהג'יאוקוד-משם-הקובץ נכשל / הרמז שגוי). מריץ מחדש ומעדכן את הבוחר.
+  void _rerunRoad() {
+    final name = _areaController.text.trim();
+    if (name.isEmpty || _autoClassicalRunning) return;
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _hintName = name;
+      _autoRoadDone = false;
+      _autoRoadResult = null;
+    });
+    _autoClassicalMatch(); // finally → setState + _maybeOfferAuto (מרענן ה-hub)
+  }
+
   /// מפעיל את מנוע-הכבישים ברקע אם יש רמז-שם; אחרת מסמן אותו כ"סיים" (בלי
   /// תוצאה) כדי שהבוחר עדיין יופיע עבור תוצאת-הרשת.
   void _kickRoadEngine() {
     if (!mounted) return;
+    debugPrint('[AUTO] kickRoad hintName=$_hintName');
     if (_hintName == null) {
       _autoRoadDone = true;
       _maybeOfferAuto();
@@ -1905,8 +1963,11 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           .timeout(const Duration(seconds: 50), onTimeout: () => const []);
       if (!mounted) return;
       final usable = suggestions.where((s) => s.verified != false).toList();
+      debugPrint('[AUTO] road done: compass=${compass?.deg} '
+          'suggestions=${suggestions.length} usable=${usable.length}');
       if (usable.length >= 3) _autoRoadResult = suggestions;
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[AUTO] road EXCEPTION: $e\n$st');
     } finally {
       if (mounted) {
         setState(() {

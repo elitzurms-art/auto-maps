@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'dart:math';
 import 'dart:ui' show Offset;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
 import 'package:latlong2/latlong.dart';
@@ -166,11 +167,15 @@ class GeminiAnchorService {
         for (final p in det.roadPoints)
           Point(p.x * detScaleX, p.y * detScaleY),
       ];
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[CLS] detect EXCEPTION: $e');
+    }
 
     // המסלול הקלאסי: רמז-אזור (חובה מה-UI) → רישום רשת-כבישים מול OSM,
     // בלי שום קריאת-מודל. מצליח ⇒ עוגנים מדויקי-פיקסל.
     final effectiveHint = areaHint?.trim() ?? '';
+    debugPrint('[CLS] junctions=${junctionPx.length} roads=${roadPointsScan.length} '
+        'hint="$effectiveHint" enabled=$classicalMatchEnabled');
     if (classicalMatchEnabled &&
         effectiveHint.isNotEmpty &&
         junctionPx.length >= 4) {
@@ -181,6 +186,7 @@ class GeminiAnchorService {
         // פעם אחת; כל אסטרטגיות-הכיוון מנוקדות יחד, הטובה מנצחת).
         onStatus?.call('בודק כיוון-מפה (יישור אוטומטי)...');
         final dsk = await Isolate.run(() => _deskewDetectSync(detImg));
+        debugPrint('[CLS] deskew=${dsk == null ? "null(straight)" : "skew=${dsk.skew.toStringAsFixed(1)} junctions=${dsk.junctions.length}"}');
         ({
           List<Point<double>> junctions,
           List<bool> rounds,
@@ -443,8 +449,28 @@ class GeminiAnchorService {
   }) async {
     // bbox צמוד ליישוב — ריפוד רחב בולע יישוב שכן עם רשת-כבישים דומה
     // וגורם להתאמות-שווא (נצפה: נקודות נחתו בחיספין במקום בנוב).
-    final raw = await _geocode(areaHint, settlementOnly: true) ??
-        await _geocode(areaHint, settlementOnly: false);
+    // ⚠️ ג'יאוקוד **מבוסס-מועמדים** — עמיד לשם-מקום ב**כל מיקום** בשם-הקובץ
+    // ולמילות-תיאור ("מסובבת"/"עותק"). מנסים n-גרמים **יורדים** (השם המלא
+    // קודם — הכי ספציפי; "כפר תבור" תופס לפני "כפר"), ואז מילים בודדות
+    // שמאל→ימין. settlement-first לכל מועמד (מילת-תיאור לא תחזיר יישוב),
+    // הראשון שמחזיר מנצח. cap 8 כדי לא להציף את Nominatim.
+    final words =
+        areaHint.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+    final ngrams = <String>[];
+    for (var size = words.length; size >= 1; size--) {
+      for (var i = 0; i + size <= words.length; i++) {
+        ngrams.add(words.sublist(i, i + size).join(' '));
+      }
+    }
+    final seen = <String>{};
+    final candidates = [for (final c in ngrams) if (seen.add(c)) c].take(8);
+    _Bbox? raw;
+    for (final q in candidates) {
+      raw = await _geocode(q, settlementOnly: true) ??
+          await _geocode(q, settlementOnly: false);
+      debugPrint('[CLS] geocode "$q" → ${raw == null ? "null" : "hit"}');
+      if (raw != null) break;
+    }
     if (raw == null) return null;
     final dLat = (raw.north - raw.south) * 0.15;
     final dLon = (raw.east - raw.west) * 0.15;
@@ -456,6 +482,9 @@ class GeminiAnchorService {
     );
     // איסוף-OSM **פעם אחת** — משותף לכל האסטרטגיות (בלי כפילות-רשת).
     final osm = await OverpassService.fetchJunctions(bbox);
+    debugPrint('[CLS] geocode bbox=(${bbox.south.toStringAsFixed(3)},'
+        '${bbox.west.toStringAsFixed(3)}..${bbox.north.toStringAsFixed(3)},'
+        '${bbox.east.toStringAsFixed(3)}) osmJunctions=${osm.junctions.length}');
     if (osm.junctions.length < 4) return null;
     final refGeo = osm.junctions;
 
@@ -544,6 +573,8 @@ class GeminiAnchorService {
     // דורשים יחס-inliers סביר (יחסית לספירת-הצמתים של האסטרטגיה הזוכה) —
     // מגן מפני התאמה-חלקית מקרית.
     final minReq = max(4, (bestScanCount * 0.35).round());
+    debugPrint('[CLS] best inliers=${best?.inliers} score=${bestScore.toStringAsFixed(1)} '
+        'minReq=$minReq scanCount=$bestScanCount → ${best == null || best.inliers < minReq ? "REJECT" : "ACCEPT"}');
     if (best == null || best.inliers < minReq) return null;
 
     return [
