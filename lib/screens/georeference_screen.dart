@@ -1970,10 +1970,12 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     }
   }
 
-  /// פותח את מסך הכוונון-ואישור עם הצעות-העוגנים ומחיל את המאושרות.
+  /// פותח את מסך הכוונון-ואישור. "אשר וייצא" שם → מחילים את הנקודות
+  /// ומייצאים **ישירות** (השילוב-השקוף במסך-הכוונון הוא-הוא התצוגה-
+  /// המקדימה — אין טעם להציגה שוב). ביטול/חזור → חזרה ל-hub.
   Future<void> _openAdjustVerify(
       List<GeminiAnchorSuggestion> suggestions) async {
-    final approved = await Navigator.push<List<({Offset pixel, LatLng world})>>(
+    final res = await Navigator.push<AdjustVerifyResult>(
       context,
       MaterialPageRoute(
         builder: (_) => AdjustVerifyScreen(
@@ -1982,25 +1984,31 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           imageHeight: _imageHeight,
           suggestions: suggestions,
           refMap: _refMap,
+          initialTps: _tpsMode,
         ),
       ),
     );
-    if (!mounted || approved == null || approved.length < 3) return;
+    if (!mounted) return;
+    if (res == null || res.points.length < 3) {
+      setState(() => _showChooser = true);
+      return;
+    }
     _captureManualBeforeAuto();
     setState(() {
       _points
         ..clear()
         ..addAll([
-          for (final a in approved)
+          for (final a in res.points)
             _ControlPoint(pixel: a.pixel)..world = a.world,
         ]);
       _suggestions = [];
       _isOnMap = false;
+      _tpsMode = res.tps;
       _result = null;
     });
-    // לא מאשרים-ויוצאים אוטומטית (בשונה מ-✨ הידני) — מציגים תצוגה-מקדימה
-    // ונשארים במסך, כדי שאפשר יהיה לעבור לרשת/לידני מכפתור-הבוחר.
     _calculate();
+    if (_result == null) return; // חישוב נכשל — נשארים לעריכה ידנית
+    await _confirm();
   }
 
   // ═══ מצב מפה ═══

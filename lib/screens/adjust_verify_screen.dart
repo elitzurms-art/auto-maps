@@ -25,16 +25,25 @@ class _Anchor {
   });
 }
 
+/// תוצאת "אשר וייצא" — הנקודות המאושרות + בחירת יישור-TPS.
+class AdjustVerifyResult {
+  final List<({Offset pixel, LatLng world})> points;
+  final bool tps;
+  const AdjustVerifyResult({required this.points, required this.tps});
+}
+
 /// מסך "כוונון ואישור" — בד-שילוב יחיד: מפת-ייחוס במסך מלא + הסריקה
 /// שקופה מעליה (סליידר שקיפות תמידי), עם פינים לכל עוגן. **הכל מאושר
 /// כברירת-מחדל** — המשתמש רק פוסל או מזיז נקודות שגויות ("את זו או את זו":
-/// צד-העולם על המפה, צד-הסריקה בבועית). "אשר הכל" → ייצוא.
+/// צד-העולם על המפה, צד-הסריקה בבועית). "אשר וייצא" → ייצוא ישיר
+/// (השילוב-השקוף כאן הוא-הוא התצוגה-המקדימה; אין מסך-ביניים נוסף).
 class AdjustVerifyScreen extends StatefulWidget {
   final String imagePath;
   final int imageWidth;
   final int imageHeight;
   final List<GeminiAnchorSuggestion> suggestions;
   final ReferenceMapController refMap;
+  final bool initialTps;
 
   const AdjustVerifyScreen({
     super.key,
@@ -43,6 +52,7 @@ class AdjustVerifyScreen extends StatefulWidget {
     required this.imageHeight,
     required this.suggestions,
     required this.refMap,
+    this.initialTps = false,
   });
 
   @override
@@ -56,6 +66,7 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
   int? _selected;
   double _opacity = 0.55;
   bool _satellite = false;
+  late bool _tpsMode = widget.initialTps;
 
   // צד-הגרירה של העוגן הנבחר: false=עולם(OSM), true=סריקה. הבחירה בכפתור
   // (לא לפי פיקסל) פותרת "נקודה על נקודה" — גוררים את הצד שנבחר, לא את
@@ -412,7 +423,7 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
     final pts = [
       for (final a in _active) (pixel: a.pixel, world: a.world),
     ];
-    Navigator.pop(context, pts);
+    Navigator.pop(context, AdjustVerifyResult(points: pts, tps: _tpsMode));
   }
 
   @override
@@ -471,7 +482,7 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
               child: FilledButton.icon(
                 onPressed: approved >= 3 ? _approveAll : null,
                 icon: const Icon(Icons.check),
-                label: Text('אשר הכל ($approved)'),
+                label: Text('אשר וייצא ($approved)'),
               ),
             ),
           ],
@@ -717,6 +728,30 @@ class _AdjustVerifyScreenState extends State<AdjustVerifyScreen> {
                   ),
               ],
             ),
+            const SizedBox(height: 4),
+            // מתג TPS — ההחלטה נקבעת כאן כי "אשר וייצא" מייצא ישירות
+            // (אין עוד מסך-ביניים שבו אפשר להדליק אותו).
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Switch(
+                  value: _tpsMode,
+                  onChanged: (v) => setState(() => _tpsMode = v),
+                ),
+                const Flexible(
+                  child: Text(
+                    'מפה לא ישרה — יישור עיוותים (TPS)',
+                    style: TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+            if (_tpsMode)
+              const Text(
+                'מומלץ 5+ נקודות מפוזרות על כל המפה',
+                style: TextStyle(color: Colors.white54, fontSize: 11),
+              ),
             const SizedBox(height: 4),
             Wrap(
               alignment: WrapAlignment.center,
