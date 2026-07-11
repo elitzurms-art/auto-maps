@@ -72,6 +72,8 @@ dependencies:
   mbtiles: ^0.4.2
   # Bundles the native sqlite3 library the `mbtiles` package needs on Windows.
   sqlite3_flutter_libs: ^0.5.20
+  # קריאת אריחי-MBTiles ישירה בהמרה ל-PMTiles (pmtiles_writer_service).
+  sqlite3: ^2.9.4
 
 dev_dependencies:
   flutter_test:

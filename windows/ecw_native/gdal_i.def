@@ -28,3 +28,4 @@ GDALGetDriverByName
 GDALCreateCopy
 GDALGetRasterBand
 GDALGetRasterColorTable
+GDALBuildOverviews

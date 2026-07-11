@@ -7,9 +7,10 @@ import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
 
 import 'gdal_warp_service.dart';
+import 'pmtiles_writer_service.dart';
 
 /// פורמטי-ייצוא נתמכים (מעבר ל-LiveMaps).
-enum ExportFormat { liveMaps, worldFile, kmz, geoTiff }
+enum ExportFormat { liveMaps, worldFile, kmz, geoTiff, mbtiles, pmtiles }
 
 /// שירות ייצוא לפורמטים ג'יאו-סטנדרטיים: World file (+.prj), KMZ
 /// (GroundOverlay ל-Google Earth), ו-GeoTIFF (דרך GDAL). כולם צורכים את
@@ -93,6 +94,12 @@ class GeoExportService {
   /// GeoTIFF זמין (דורש את GDAL המצורף).
   static bool get geoTiffSupported => GdalWarpService.isSupportedPlatform;
 
+  /// MBTiles זמין (דורש את GDAL המצורף, כמו GeoTIFF).
+  static bool get mbtilesSupported => GdalWarpService.isSupportedPlatform;
+
+  /// PMTiles זמין — נבנה מ-MBTiles-ביניים, אז אותה דרישת-GDAL.
+  static bool get pmtilesSupported => mbtilesSupported;
+
   /// כותב GeoTIFF (WGS84, עם geotransform מלא — תומך בסיבוב) מ-[pngPath].
   /// מחזיר את נתיב ה-TIF.
   static Future<String> writeGeoTiff({
@@ -110,6 +117,74 @@ class GeoExportService {
       imageHeight: imageHeight,
     );
     return tifPath;
+  }
+
+  /// כותב MBTiles (פירמידת-אריחים, Web Mercator) מ-[pngPath]. מחזיר את
+  /// נתיב ה-mbtiles.
+  static Future<String> writeMbtiles({
+    required String pngPath,
+    required List<LatLng> corners,
+    required int imageWidth,
+    required int imageHeight,
+    required String name,
+    required String mbtilesPath,
+  }) async {
+    // דריסה: GDAL לא דורס mbtiles קיים אלא נכשל — מוחקים קודם.
+    final existing = File(mbtilesPath);
+    if (existing.existsSync()) existing.deleteSync();
+    await GdalWarpService.writeMbtiles(
+      srcImagePath: pngPath,
+      dstMbtilesPath: mbtilesPath,
+      corners: corners,
+      imageWidth: imageWidth,
+      imageHeight: imageHeight,
+      name: name,
+    );
+    return mbtilesPath;
+  }
+
+  /// כותב PMTiles: אורז את פירמידת-האריחים לארכיון יחיד (CDN/MapLibre).
+  /// אם [existingMbtilesPath] סופק (המשתמש ייצא גם MBTiles) — ממירים אותו;
+  /// אחרת נוצר MBTiles-ביניים זמני ונמחק בסוף. מחזיר את נתיב ה-pmtiles.
+  static Future<String> writePmtiles({
+    required String pngPath,
+    required List<LatLng> corners,
+    required int imageWidth,
+    required int imageHeight,
+    required String name,
+    required String pmtilesPath,
+    String? existingMbtilesPath,
+  }) async {
+    var mb = existingMbtilesPath;
+    String? tmp;
+    if (mb == null) {
+      tmp = p.join(
+        Directory.systemTemp.path,
+        'pmtiles_src_${DateTime.now().millisecondsSinceEpoch}.mbtiles',
+      );
+      await writeMbtiles(
+        pngPath: pngPath,
+        corners: corners,
+        imageWidth: imageWidth,
+        imageHeight: imageHeight,
+        name: name,
+        mbtilesPath: tmp,
+      );
+      mb = tmp;
+    }
+    try {
+      await PmtilesWriterService.mbtilesToPmtiles(
+        mbtilesPath: mb,
+        pmtilesPath: pmtilesPath,
+      );
+    } finally {
+      if (tmp != null) {
+        try {
+          File(tmp).deleteSync();
+        } catch (_) {}
+      }
+    }
+    return pmtilesPath;
   }
 
   /// מוודא שקיים PNG בנתיב [pngPath] (ממיר מהמקור אם צריך). מוחזר כדי

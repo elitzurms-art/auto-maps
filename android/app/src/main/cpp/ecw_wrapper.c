@@ -79,6 +79,10 @@ extern int GDALDatasetRasterIO(GDALDatasetH hDS, int eRWFlag, int nXOff,
                                int nBufXSize, int nBufYSize, int eBufType,
                                int nBandCount, int *panBandMap, int nPixelSpace,
                                int nLineSpace, int nBandSpace);
+extern int GDALBuildOverviews(GDALDatasetH, const char *pszResampling,
+                              int nOverviews, int *panOverviewList,
+                              int nListBands, int *panBandList,
+                              void *pfnProgress, void *pProgressData);
 
 // ───────────────────────── Windows self-configuration ───────────────────────
 // On Windows the app ships the OSGeo4W GDAL runtime *next to the .exe* (no
@@ -427,6 +431,110 @@ int ecw_warp_tps(const char *src_path, const char *dst_png_path, int gcp_count,
   GDALClose(out);
   LOGI("warp_tps ok: %s (%dx%d, %d GCPs)", dst_png_path, out_size2[0],
        out_size2[1], gcp_count);
+  return 0;
+}
+
+// Export a georeferenced raster to MBTiles (raster tile pyramid, EPSG:3857).
+// gt6: WGS84 geotransform in GDAL order (rotation supported — the explicit
+// warp squares it up). name: layer name stamped into MBTiles metadata.
+//
+// Pipeline: MEM copy (+expand palette→rgba) → stamp gt+WGS84 → GDALWarp to
+// EPSG:3857 with alpha (transparent collar for rotated maps) → CreateCopy to
+// MBTILES (PNG tiles) → BuildOverviews for the zoom-out levels.
+// Returns 0 on success, negative on error.
+int ecw_write_mbtiles(const char *src_path, const char *dst_path,
+                      const double *gt6, const char *name) {
+  ensure_registered();
+  if (!src_path || !dst_path || !gt6) return -1;
+
+  void *mb_drv = GDALGetDriverByName("MBTILES");
+  if (!mb_drv) {
+    LOGE("mbtiles: MBTILES driver missing in bundled GDAL");
+    return -2;
+  }
+
+  GDALDatasetH src = GDALOpen(src_path, /*GA_ReadOnly*/ 0);
+  if (!src) {
+    LOGE("mbtiles: open failed: %s — %s", src_path, CPLGetLastErrorMsg());
+    return -3;
+  }
+
+  // ── 1. MEM copy (expand palette if needed) + stamp georeference ──
+  int has_palette =
+      GDALGetRasterColorTable(GDALGetRasterBand(src, 1)) != NULL;
+  char *targv[7] = {"-of", "MEM", NULL, NULL, NULL, NULL, NULL};
+  if (has_palette) { targv[2] = "-expand"; targv[3] = "rgba"; }
+  GDALTranslateOptionsH topts = GDALTranslateOptionsNew(targv, NULL);
+  GDALDatasetH mem = topts ? GDALTranslate("", src, topts, NULL) : NULL;
+  if (topts) GDALTranslateOptionsFree(topts);
+  GDALClose(src);
+  if (!mem) {
+    LOGE("mbtiles: translate(MEM) failed: %s", CPLGetLastErrorMsg());
+    return -4;
+  }
+  double gt[6];
+  for (int i = 0; i < 6; i++) gt[i] = gt6[i];
+  GDALSetGeoTransform(mem, gt);
+  GDALSetProjection(
+      mem,
+      "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,"
+      "298.257223563]],PRIMEM[\"Greenwich\",0],UNIT[\"degree\","
+      "0.0174532925199433]]");
+
+  // ── 2. Warp to Web Mercator (MBTiles' tile grid) with alpha ──
+  int bands = GDALGetRasterCount(mem);
+  char *wargv[9];
+  int wi = 0;
+  wargv[wi++] = "-of";    wargv[wi++] = "MEM";
+  wargv[wi++] = "-t_srs"; wargv[wi++] = "EPSG:3857";
+  wargv[wi++] = "-r";     wargv[wi++] = "bilinear";
+  if (bands < 4) wargv[wi++] = "-dstalpha";
+  wargv[wi] = NULL;
+  GDALWarpAppOptionsH wopts = GDALWarpAppOptionsNew(wargv, NULL);
+  int usage_err = 0;
+  GDALDatasetH warped =
+      wopts ? GDALWarp("", NULL, 1, &mem, wopts, &usage_err) : NULL;
+  if (wopts) GDALWarpAppOptionsFree(wopts);
+  GDALClose(mem);
+  if (!warped) {
+    LOGE("mbtiles: warp failed (usageErr=%d): %s", usage_err,
+         CPLGetLastErrorMsg());
+    return -5;
+  }
+  int w = GDALGetRasterXSize(warped);
+  int h = GDALGetRasterYSize(warped);
+
+  // ── 3. CreateCopy to MBTILES (PNG tiles keep the transparent collar) ──
+  char nameopt[256];
+  snprintf(nameopt, sizeof(nameopt), "NAME=%s",
+           (name && *name) ? name : "layer");
+  char *co[] = {"TILE_FORMAT=PNG", nameopt, NULL};
+  GDALDatasetH out =
+      GDALCreateCopy(mb_drv, dst_path, warped, /*bStrict*/ 0, co, NULL, NULL);
+  GDALClose(warped);
+  if (!out) {
+    LOGE("mbtiles: CreateCopy failed: %s — %s", dst_path,
+         CPLGetLastErrorMsg());
+    return -6;
+  }
+  GDALClose(out);
+
+  // ── 4. Zoom-out overviews: 2,4,8… while the raster still exceeds a tile ──
+  int levels[24];
+  int n = 0;
+  int mind = w < h ? w : h;
+  for (int lv = 2; n < 24 && mind / lv >= 256; lv *= 2) levels[n++] = lv;
+  if (n > 0) {
+    GDALDatasetH upd = GDALOpen(dst_path, /*GA_Update*/ 1);
+    if (upd) {
+      if (GDALBuildOverviews(upd, "AVERAGE", n, levels, 0, NULL, NULL,
+                             NULL) != 0) {
+        LOGE("mbtiles: BuildOverviews failed: %s", CPLGetLastErrorMsg());
+      }
+      GDALClose(upd);
+    }
+  }
+  LOGI("mbtiles ok: %s (%dx%d, %d overview levels)", dst_path, w, h, n);
   return 0;
 }
 

@@ -33,6 +33,11 @@ typedef _GeoTiffNative = Int32 Function(
 typedef _GeoTiffDart = int Function(
     Pointer<Utf8> src, Pointer<Utf8> dst, Pointer<Double> gt6);
 
+typedef _MbtilesNative = Int32 Function(Pointer<Utf8> src, Pointer<Utf8> dst,
+    Pointer<Double> gt6, Pointer<Utf8> name);
+typedef _MbtilesDart = int Function(Pointer<Utf8> src, Pointer<Utf8> dst,
+    Pointer<Double> gt6, Pointer<Utf8> name);
+
 /// תוצאת יישור TPS — הרסטר המיושר (PNG חדש) + הפינות/מימדים שלו.
 class TpsWarpResult {
   /// ה-PNG המיושר-צפון שנכתב (זו התמונה שמיוצאת ל-LiveMaps במקום המקור).
@@ -126,11 +131,39 @@ class GdalWarpService {
         'ייצוא GeoTIFF דורש את GDAL המצורף (Windows/Android/iOS בלבד)',
       );
     }
+    final gt = _gtFromCorners(corners, imageWidth, imageHeight);
+    await Isolate.run(() => _geoTiffInIsolate(srcImagePath, dstTiffPath, gt));
+  }
+
+  /// כותב MBTiles (פירמידת-אריחי-רסטר ב-Web Mercator) מ-[srcImagePath] לפי
+  /// 4 הפינות — תומך בסיבוב (ה-warp הנייטיבי מיישר). [name] נחתם ב-metadata.
+  static Future<void> writeMbtiles({
+    required String srcImagePath,
+    required String dstMbtilesPath,
+    required List<LatLng> corners,
+    required int imageWidth,
+    required int imageHeight,
+    required String name,
+  }) async {
+    if (!isSupportedPlatform) {
+      throw UnsupportedError(
+        'ייצוא MBTiles דורש את GDAL המצורף (Windows/Android/iOS בלבד)',
+      );
+    }
+    final gt = _gtFromCorners(corners, imageWidth, imageHeight);
+    await Isolate.run(
+      () => _mbtilesInIsolate(srcImagePath, dstMbtilesPath, gt, name),
+    );
+  }
+
+  /// geotransform בסדר GDAL: {originX, pxW, rowRot, originY, colRot, pxH}.
+  /// world = gt0 + px·gt1 + py·gt2 (lon) ; gt3 + px·gt4 + py·gt5 (lat).
+  /// [corners] בסדר NW, NE, SE, SW.
+  static List<double> _gtFromCorners(
+      List<LatLng> corners, int imageWidth, int imageHeight) {
     final nw = corners[0], ne = corners[1], sw = corners[3];
     final w = imageWidth.toDouble(), h = imageHeight.toDouble();
-    // geotransform בסדר GDAL: {originX, pxW, rowRot, originY, colRot, pxH}.
-    // world = gt0 + px·gt1 + py·gt2 (lon) ; gt3 + px·gt4 + py·gt5 (lat).
-    final gt = <double>[
+    return <double>[
       nw.longitude,
       (ne.longitude - nw.longitude) / w,
       (sw.longitude - nw.longitude) / h,
@@ -138,7 +171,28 @@ class GdalWarpService {
       (ne.latitude - nw.latitude) / w,
       (sw.latitude - nw.latitude) / h,
     ];
-    await Isolate.run(() => _geoTiffInIsolate(srcImagePath, dstTiffPath, gt));
+  }
+
+  static void _mbtilesInIsolate(
+      String src, String dst, List<double> gt, String name) {
+    final lib = openEcwLibrary();
+    final fn = lib.lookupFunction<_MbtilesNative, _MbtilesDart>(
+      'ecw_write_mbtiles',
+    );
+    final srcP = src.toNativeUtf8();
+    final dstP = dst.toNativeUtf8();
+    final nameP = name.toNativeUtf8();
+    final gtP = malloc<Double>(6);
+    try {
+      gtP.asTypedList(6).setAll(0, gt);
+      final rc = fn(srcP, dstP, gtP, nameP);
+      if (rc != 0) throw Exception('ייצוא MBTiles נכשל (קוד $rc)');
+    } finally {
+      malloc.free(srcP);
+      malloc.free(dstP);
+      malloc.free(nameP);
+      malloc.free(gtP);
+    }
   }
 
   static void _geoTiffInIsolate(String src, String dst, List<double> gt) {
