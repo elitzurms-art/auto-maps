@@ -81,8 +81,7 @@ class _HomeScreenState extends State<HomeScreen> {
               SnackBar(
                 content: Text(
                   'זוהה GeoTIFF עם ג\'יאורפרנס מובנה '
-                  '(${geo.result.detectedCrs}) — מוכן לייצוא. '
-                  'אפשר גם לערוך נעיצה ידנית.',
+                  '(${geo.result.detectedCrs}) — מוכן לייצוא.',
                 ),
                 duration: const Duration(seconds: 6),
               ),
@@ -177,37 +176,37 @@ class _HomeScreenState extends State<HomeScreen> {
     return sel;
   }
 
-  /// כפתור "ערוך מחדש" — כשכבר יש תוצאה, מזהיר שהעריכה מתחילה נעיצה
-  /// מאפס והעבודה הנוכחית (נקודות + כוונון) תלך לאיבוד.
-  Future<void> _editAgain(bool hasResult) async {
-    if (hasResult) {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => Directionality(
-          textDirection: TextDirection.rtl,
-          child: AlertDialog(
-            title: const Text('לערוך מחדש?'),
-            content: const Text(
-              'עריכה מחדש מתחילה נעיצה חדשה מאפס. הנקודות והכוונון הנוכחיים '
-              'לא יישמרו, ותצטרך לנעוץ ולאשר מחדש.\n\n'
-              'התוצאה שכבר חושבה תישאר עד שתסיים נעיצה חדשה.',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('ביטול'),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('ערוך מחדש'),
-              ),
-            ],
+  /// חץ-החזרה במסך-הסיום — מזהיר שהתוצאה תנוקה ומחזיר למצב-ההתחלה
+  /// (בחירת תמונה / צילום).
+  Future<void> _startOver() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: const Text('לחזור להתחלה?'),
+          content: const Text(
+            'החזרה מנקה את התוצאה הנוכחית וחוזרת למסך בחירת-התמונה. '
+            'אם עוד לא ייצאת — העבודה תאבד.',
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('ביטול'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('חזור להתחלה'),
+            ),
+          ],
         ),
-      );
-      if (ok != true) return;
-    }
-    await _openGeoreference(_imagePath!);
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() {
+      _imagePath = null;
+      _outcome = null;
+    });
   }
 
   Future<void> _openGeoreference(String path) async {
@@ -288,6 +287,30 @@ class _HomeScreenState extends State<HomeScreen> {
         );
         written.add(p.basename(tif));
       }
+      String? mbtilesOut;
+      if (params.formats.contains(ExportFormat.mbtiles)) {
+        mbtilesOut = await GeoExportService.writeMbtiles(
+          pngPath: pngPath,
+          corners: corners,
+          imageWidth: outcome.result.imageWidth,
+          imageHeight: outcome.result.imageHeight,
+          name: params.name,
+          mbtilesPath: p.join(params.targetDir, '$base.mbtiles'),
+        );
+        written.add(p.basename(mbtilesOut));
+      }
+      if (params.formats.contains(ExportFormat.pmtiles)) {
+        final pm = await GeoExportService.writePmtiles(
+          pngPath: pngPath,
+          corners: corners,
+          imageWidth: outcome.result.imageWidth,
+          imageHeight: outcome.result.imageHeight,
+          name: params.name,
+          pmtilesPath: p.join(params.targetDir, '$base.pmtiles'),
+          existingMbtilesPath: mbtilesOut,
+        );
+        written.add(p.basename(pm));
+      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context)
@@ -329,6 +352,14 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Auto Maps — כלי ג\'יאורפרנס'),
+          // חץ-חזרה במסך-הסיום: מזהיר ומחזיר למצב-ההתחלה (בחירת תמונה).
+          leading: hasResult
+              ? IconButton(
+                  icon: const Icon(Icons.arrow_back),
+                  tooltip: 'חזור להתחלה',
+                  onPressed: _startOver,
+                )
+              : null,
         ),
         body: Center(
           child: ConstrainedBox(
@@ -342,32 +373,44 @@ class _HomeScreenState extends State<HomeScreen> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const Icon(Icons.map, size: 72, color: Colors.blueGrey),
+                    Icon(
+                      hasResult ? Icons.check_circle_outline : Icons.map,
+                      size: 72,
+                      color: hasResult ? Colors.green : Colors.blueGrey,
+                    ),
                     const SizedBox(height: 16),
-                    const Text(
-                      'ייבא תמונת מפה, נעץ נקודות פיקסל↔עולם מול OpenStreetMap, '
-                      'וייצא שכבה ג\'יאורפרנסית לאפליקציית LiveMaps.',
+                    Text(
+                      hasResult
+                          ? 'השכבה מוכנה — ייצא לקובץ, או חזור אחורה '
+                              'כדי להתחיל מפה חדשה.'
+                          : 'ייבא תמונת מפה, נעץ נקודות פיקסל↔עולם מול '
+                              'OpenStreetMap, וייצא שכבה ג\'יאורפרנסית '
+                              'לאפליקציית LiveMaps.',
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 32),
-                    ElevatedButton.icon(
-                      onPressed: _pickImage,
-                      icon: const Icon(Icons.image_search),
-                      label: const Text('בחר תמונה'),
-                      style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                      ),
-                    ),
-                    if (_cameraSupported) ...[
-                      const SizedBox(height: 12),
-                      OutlinedButton.icon(
-                        onPressed: _captureImage,
-                        icon: const Icon(Icons.photo_camera),
-                        label: const Text('צלם מפה'),
-                        style: OutlinedButton.styleFrom(
+                    // מסך-ההתחלה: בחירה/צילום. במסך-הסיום אין אותם —
+                    // מתחילים-מחדש רק דרך חץ-החזרה (עם אזהרה).
+                    if (!hasResult) ...[
+                      ElevatedButton.icon(
+                        onPressed: _pickImage,
+                        icon: const Icon(Icons.image_search),
+                        label: const Text('בחר תמונה'),
+                        style: ElevatedButton.styleFrom(
                           padding: const EdgeInsets.symmetric(vertical: 16),
                         ),
                       ),
+                      if (_cameraSupported) ...[
+                        const SizedBox(height: 12),
+                        OutlinedButton.icon(
+                          onPressed: _captureImage,
+                          icon: const Icon(Icons.photo_camera),
+                          label: const Text('צלם מפה'),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                          ),
+                        ),
+                      ],
                     ],
                     if (hasImage) ...[
                       const SizedBox(height: 24),
@@ -376,17 +419,17 @@ class _HomeScreenState extends State<HomeScreen> {
                         result: _outcome?.result,
                         transform: _outcome?.transform,
                       ),
+                    ],
+                    if (hasImage && !hasResult) ...[
                       const SizedBox(height: 16),
                       OutlinedButton.icon(
-                        onPressed: () => _editAgain(hasResult),
+                        onPressed: () => _openGeoreference(_imagePath!),
                         icon: const Icon(Icons.edit_location_alt),
-                        label: Text(
-                          hasResult ? 'ערוך מחדש' : 'המשך לנעיצת נקודות',
-                        ),
+                        label: const Text('המשך לנעיצת נקודות'),
                       ),
                     ],
                     if (hasResult) ...[
-                      const SizedBox(height: 12),
+                      const SizedBox(height: 16),
                       ElevatedButton.icon(
                         onPressed: _export,
                         icon: const Icon(Icons.save_alt),
@@ -566,6 +609,18 @@ class _ExportDialogState extends State<_ExportDialog> {
                 'GeoTIFF${GeoExportService.geoTiffSupported ? '' : ' (לא נתמך בפלטפורמה)'}',
                 '$base.tif — מיושר-צפון',
                 enabled: GeoExportService.geoTiffSupported,
+              ),
+              _fmtTile(
+                ExportFormat.mbtiles,
+                'MBTiles${GeoExportService.mbtilesSupported ? '' : ' (לא נתמך בפלטפורמה)'}',
+                '$base.mbtiles — פירמידת-אריחים (QGIS/שרתי-מפות)',
+                enabled: GeoExportService.mbtilesSupported,
+              ),
+              _fmtTile(
+                ExportFormat.pmtiles,
+                'PMTiles${GeoExportService.pmtilesSupported ? '' : ' (לא נתמך בפלטפורמה)'}',
+                '$base.pmtiles — אריחים בקובץ יחיד (CDN/MapLibre, בלי שרת)',
+                enabled: GeoExportService.pmtilesSupported,
               ),
             ],
           ),
