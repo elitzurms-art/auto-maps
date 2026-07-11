@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
 
 import 'gdal_warp_service.dart';
+import 'mbtiles_writer_service.dart';
 import 'pmtiles_writer_service.dart';
 
 /// פורמטי-ייצוא נתמכים (מעבר ל-LiveMaps).
@@ -94,10 +95,11 @@ class GeoExportService {
   /// GeoTIFF זמין (דורש את GDAL המצורף).
   static bool get geoTiffSupported => GdalWarpService.isSupportedPlatform;
 
-  /// MBTiles זמין (דורש את GDAL המצורף, כמו GeoTIFF).
-  static bool get mbtilesSupported => GdalWarpService.isSupportedPlatform;
+  /// MBTiles זמין בכל הפלטפורמות — כותב-Dart טהור (בלי GDAL; ה-libgdal.so
+  /// של אנדרואיד נבנה בלי sqlite3 ואין בו דרייבר MBTILES).
+  static bool get mbtilesSupported => true;
 
-  /// PMTiles זמין — נבנה מ-MBTiles-ביניים, אז אותה דרישת-GDAL.
+  /// PMTiles זמין — נבנה מ-MBTiles-ביניים (גם הוא Dart טהור).
   static bool get pmtilesSupported => mbtilesSupported;
 
   /// כותב GeoTIFF (WGS84, עם geotransform מלא — תומך בסיבוב) מ-[pngPath].
@@ -124,21 +126,14 @@ class GeoExportService {
   static Future<String> writeMbtiles({
     required String pngPath,
     required List<LatLng> corners,
-    required int imageWidth,
-    required int imageHeight,
     required String name,
     required String mbtilesPath,
   }) async {
-    // דריסה: GDAL לא דורס mbtiles קיים אלא נכשל — מוחקים קודם.
-    final existing = File(mbtilesPath);
-    if (existing.existsSync()) existing.deleteSync();
-    await GdalWarpService.writeMbtiles(
-      srcImagePath: pngPath,
-      dstMbtilesPath: mbtilesPath,
+    await MbtilesWriterService.write(
+      pngPath: pngPath,
       corners: corners,
-      imageWidth: imageWidth,
-      imageHeight: imageHeight,
       name: name,
+      mbtilesPath: mbtilesPath,
     );
     return mbtilesPath;
   }
@@ -149,8 +144,6 @@ class GeoExportService {
   static Future<String> writePmtiles({
     required String pngPath,
     required List<LatLng> corners,
-    required int imageWidth,
-    required int imageHeight,
     required String name,
     required String pmtilesPath,
     String? existingMbtilesPath,
@@ -165,8 +158,6 @@ class GeoExportService {
       await writeMbtiles(
         pngPath: pngPath,
         corners: corners,
-        imageWidth: imageWidth,
-        imageHeight: imageHeight,
         name: name,
         mbtilesPath: tmp,
       );

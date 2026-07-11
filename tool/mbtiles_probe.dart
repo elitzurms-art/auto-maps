@@ -1,26 +1,18 @@
-// בוחן-עשן לייצוא MBTiles: טוען את auto_maps_ecw.dll מתיקיית ה-build,
-// יוצר PNG סינתטי, קורא ל-ecw_write_mbtiles ובודק שנוצר קובץ.
-// הרצה אחרי build, עם תיקיית ה-Debug ב-PATH (בשביל gdal313.dll וחבריו):
-//   $env:PATH = "build\windows\x64\runner\Debug;$env:PATH"
-//   dart run tool/mbtiles_probe.dart
-import 'dart:ffi';
+// בוחן-עשן לכותב ה-MBTiles ה-Dart-טהור (MbtilesWriterService — בלי GDAL):
+// PNG סינתטי + 4 פינות → MBTiles. אימות-תוכן: gdalinfo (אם מותקן OSGeo4W).
+// הרצה: dart run tool/mbtiles_probe.dart
 import 'dart:io';
 
-import 'package:ffi/ffi.dart';
+import 'package:auto_maps/services/mbtiles_writer_service.dart';
 import 'package:image/image.dart' as img;
+import 'package:latlong2/latlong.dart';
+import 'package:sqlite3/sqlite3.dart' as sql;
 
-void main() {
-  const dllPath = r'build\windows\x64\runner\Debug\auto_maps_ecw.dll';
-  if (!File(dllPath).existsSync()) {
-    print('DLL not built: $dllPath');
-    exitCode = 1;
-    return;
-  }
-
-  // תמונה סינתטית עם קצת מגוון (שהאריחים לא יהיו אחידים לגמרי).
+Future<void> main() async {
   final tmp = Directory.systemTemp.path;
   final src = '$tmp\\בדיקת_mbtiles.png';
   final dst = '$tmp\\בדיקת_mbtiles.mbtiles';
+
   final im = img.Image(width: 800, height: 600);
   img.fill(im, color: img.ColorRgb8(240, 240, 220));
   img.fillRect(im,
@@ -28,31 +20,34 @@ void main() {
   img.fillRect(im,
       x1: 300, y1: 300, x2: 500, y2: 550, color: img.ColorRgb8(40, 80, 200));
   File(src).writeAsBytesSync(img.encodePng(im));
-  if (File(dst).existsSync()) File(dst).deleteSync();
 
-  // geotransform: ‎~0.008°×0.006° סביב 35.0E/32.0N (ישראל).
-  final gt = <double>[35.0, 0.00001, 0, 32.0, 0, -0.00001];
+  // ‎0.008°×0.006°‎ סביב 35.0E/32.0N — פינות NW,NE,SE,SW.
+  const nw = LatLng(32.0, 35.0);
+  const ne = LatLng(32.0, 35.008);
+  const se = LatLng(31.994, 35.008);
+  const sw = LatLng(31.994, 35.0);
 
-  final fn = DynamicLibrary.open(dllPath).lookupFunction<
-      Int32 Function(
-          Pointer<Utf8>, Pointer<Utf8>, Pointer<Double>, Pointer<Utf8>),
-      int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Double>,
-          Pointer<Utf8>)>('ecw_write_mbtiles');
+  await MbtilesWriterService.write(
+    pngPath: src,
+    corners: const [nw, ne, se, sw],
+    name: 'בדיקת שכבה',
+    mbtilesPath: dst,
+  );
 
-  final s = src.toNativeUtf8();
-  final d = dst.toNativeUtf8();
-  final n = 'בדיקת שכבה'.toNativeUtf8();
-  final g = calloc<Double>(6);
-  g.asTypedList(6).setAll(0, gt);
-  final rc = fn(s, d, g, n);
-  calloc.free(s);
-  calloc.free(d);
-  calloc.free(n);
-  calloc.free(g);
+  final db = sql.sqlite3.open(dst, mode: sql.OpenMode.readOnly);
+  final meta = {
+    for (final r in db.select('SELECT name, value FROM metadata'))
+      r['name']: r['value'],
+  };
+  final counts = db.select(
+      'SELECT zoom_level z, count(*) n FROM tiles GROUP BY z ORDER BY z');
+  db.dispose();
 
-  final exists = File(dst).existsSync();
-  final size = exists ? File(dst).lengthSync() : 0;
-  print('mbtiles rc=$rc, exists=$exists, size=$size bytes');
-  print('output: $dst');
-  exitCode = (rc == 0 && exists && size > 0) ? 0 : 1;
+  final size = File(dst).lengthSync();
+  print('mbtiles ok: $dst ($size bytes)');
+  print('metadata: $meta');
+  for (final r in counts) {
+    print('  zoom ${r['z']}: ${r['n']} tiles');
+  }
+  exitCode = size > 0 && counts.isNotEmpty ? 0 : 1;
 }

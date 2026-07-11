@@ -292,8 +292,6 @@ class _HomeScreenState extends State<HomeScreen> {
         mbtilesOut = await GeoExportService.writeMbtiles(
           pngPath: pngPath,
           corners: corners,
-          imageWidth: outcome.result.imageWidth,
-          imageHeight: outcome.result.imageHeight,
           name: params.name,
           mbtilesPath: p.join(params.targetDir, '$base.mbtiles'),
         );
@@ -303,8 +301,6 @@ class _HomeScreenState extends State<HomeScreen> {
         final pm = await GeoExportService.writePmtiles(
           pngPath: pngPath,
           corners: corners,
-          imageWidth: outcome.result.imageWidth,
-          imageHeight: outcome.result.imageHeight,
           name: params.name,
           pmtilesPath: p.join(params.targetDir, '$base.pmtiles'),
           existingMbtilesPath: mbtilesOut,
