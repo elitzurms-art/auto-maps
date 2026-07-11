@@ -4,7 +4,6 @@ import 'dart:isolate';
 import 'dart:math';
 import 'dart:ui' show Offset;
 
-import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
 import 'package:latlong2/latlong.dart';
@@ -167,15 +166,11 @@ class GeminiAnchorService {
         for (final p in det.roadPoints)
           Point(p.x * detScaleX, p.y * detScaleY),
       ];
-    } catch (e) {
-      debugPrint('[CLS] detect EXCEPTION: $e');
-    }
+    } catch (_) {}
 
     // המסלול הקלאסי: רמז-אזור (חובה מה-UI) → רישום רשת-כבישים מול OSM,
     // בלי שום קריאת-מודל. מצליח ⇒ עוגנים מדויקי-פיקסל.
     final effectiveHint = areaHint?.trim() ?? '';
-    debugPrint('[CLS] junctions=${junctionPx.length} roads=${roadPointsScan.length} '
-        'hint="$effectiveHint" enabled=$classicalMatchEnabled');
     if (classicalMatchEnabled &&
         effectiveHint.isNotEmpty &&
         junctionPx.length >= 4) {
@@ -186,7 +181,6 @@ class GeminiAnchorService {
         // פעם אחת; כל אסטרטגיות-הכיוון מנוקדות יחד, הטובה מנצחת).
         onStatus?.call('בודק כיוון-מפה (יישור אוטומטי)...');
         final dsk = await Isolate.run(() => _deskewDetectSync(detImg));
-        debugPrint('[CLS] deskew=${dsk == null ? "null(straight)" : "skew=${dsk.skew.toStringAsFixed(1)} junctions=${dsk.junctions.length}"}');
         ({
           List<Point<double>> junctions,
           List<bool> rounds,
@@ -468,7 +462,6 @@ class GeminiAnchorService {
     for (final q in candidates) {
       raw = await _geocode(q, settlementOnly: true) ??
           await _geocode(q, settlementOnly: false);
-      debugPrint('[CLS] geocode "$q" → ${raw == null ? "null" : "hit"}');
       if (raw != null) break;
     }
     if (raw == null) return null;
@@ -482,9 +475,6 @@ class GeminiAnchorService {
     );
     // איסוף-OSM **פעם אחת** — משותף לכל האסטרטגיות (בלי כפילות-רשת).
     final osm = await OverpassService.fetchJunctions(bbox);
-    debugPrint('[CLS] geocode bbox=(${bbox.south.toStringAsFixed(3)},'
-        '${bbox.west.toStringAsFixed(3)}..${bbox.north.toStringAsFixed(3)},'
-        '${bbox.east.toStringAsFixed(3)}) osmJunctions=${osm.junctions.length}');
     if (osm.junctions.length < 4) return null;
     final refGeo = osm.junctions;
 
@@ -573,8 +563,6 @@ class GeminiAnchorService {
     // דורשים יחס-inliers סביר (יחסית לספירת-הצמתים של האסטרטגיה הזוכה) —
     // מגן מפני התאמה-חלקית מקרית.
     final minReq = max(4, (bestScanCount * 0.35).round());
-    debugPrint('[CLS] best inliers=${best?.inliers} score=${bestScore.toStringAsFixed(1)} '
-        'minReq=$minReq scanCount=$bestScanCount → ${best == null || best.inliers < minReq ? "REJECT" : "ACCEPT"}');
     if (best == null || best.inliers < minReq) return null;
 
     return [

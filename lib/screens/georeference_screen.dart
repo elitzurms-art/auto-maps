@@ -378,8 +378,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         .replaceAll(RegExp(r'[_\-]+'), ' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
-    debugPrint('[AUTO] filenameHint cleaned="$name" '
-        'from="${p.basenameWithoutExtension(widget.imagePath)}"');
     if (name.length < 2) return;
     _hintName = name; // לרמז המסלול-הקלאסי (Overpass) — נצרך ב-_kickRoadEngine
     if (_areaController.text.isEmpty) _areaController.text = name; // ל-hub
@@ -1812,7 +1810,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     }
     // **רקע** — שומרים את התוצאה וממתינים גם למנוע-הכבישים; הבוחר יוצג
     // כששניהם סיימו (`_maybeOfferAuto`).
-    debugPrint('[AUTO] grid done: ticks=${ticks.length}');
     _autoGridDone = true;
     if (ticks.length >= 2) _autoGridResult = ticks;
     _maybeOfferAuto();
@@ -1822,9 +1819,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   /// אם המשתמש עדיין לא נעץ ידנית — פותח מיד את מסך-הבחירה; אם כבר עובד
   /// ידנית — סנאקבר עדין 'הצג' (כפתור-החזור תמיד יחזיר לבוחר ממילא).
   void _maybeOfferAuto() {
-    debugPrint('[AUTO] maybeOffer gridDone=$_autoGridDone roadDone=$_autoRoadDone '
-        'offered=$_autoOffered grid=${_autoGridResult != null} '
-        'road=${_autoRoadResult != null}');
     if (!_autoGridDone || !_autoRoadDone) return;
     if (_autoOffered || !mounted) return;
     if (_autoGridResult == null && _autoRoadResult == null) return;
@@ -1919,7 +1913,6 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   /// תוצאה) כדי שהבוחר עדיין יופיע עבור תוצאת-הרשת.
   void _kickRoadEngine() {
     if (!mounted) return;
-    debugPrint('[AUTO] kickRoad hintName=$_hintName');
     if (_hintName == null) {
       _autoRoadDone = true;
       _maybeOfferAuto();
@@ -1963,11 +1956,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           .timeout(const Duration(seconds: 50), onTimeout: () => const []);
       if (!mounted) return;
       final usable = suggestions.where((s) => s.verified != false).toList();
-      debugPrint('[AUTO] road done: compass=${compass?.deg} '
-          'suggestions=${suggestions.length} usable=${usable.length}');
       if (usable.length >= 3) _autoRoadResult = suggestions;
-    } catch (e, st) {
-      debugPrint('[AUTO] road EXCEPTION: $e\n$st');
+    } catch (_) {
     } finally {
       if (mounted) {
         setState(() {
