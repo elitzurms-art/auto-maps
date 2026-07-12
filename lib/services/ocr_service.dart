@@ -119,8 +119,12 @@ class OcrService {
   }
 
   // ── קריאת-תוויות מכל התמונה (איתור-הרשת האוטומטי) ──
-  static const _tileSrc = 1100; // צלע-אריח בפיקסלי-מקור
-  static const _tileOverlap = 220; // חפיפה — שתווית על-התפר לא תיחתך
+  // ⚠️ גודל-האריח קריטי (כויל אמפירית על אושה): ב-psm 11, גוש-תוכן צפוף
+  // (מפת-גוש עמוסת מספרי-מגרשים) גורם ל-Tesseract לזרוק תווית מבודדת
+  // כרעש. אריח-OCR ≤ ~1650px (‏550 מקור ×3) קורא את התווית גם לצד מסה
+  // צפופה; ‏3300px (‏1100 מקור) — כבר לא.
+  static const _tileSrc = 550; // צלע-אריח בפיקסלי-מקור
+  static const _tileOverlap = 140; // חפיפה — שתווית על-התפר לא תיחתך
   static const _upscale = 3; // ההגדלה ש-Tesseract דורש לתוויות קטנות
 
   /// קורא את כל תוויות-התמונה בשני כיוונים — אופקי ([OcrWord] ב-normal)
@@ -139,7 +143,30 @@ class OcrService {
     final im = frame.image;
     codec.dispose();
     try {
-      final rects = _tileRects(im.width, im.height);
+      // דילוג על אריחים כמעט-ריקים (שולי-נייר) — חוסך קריאות-OCR מיותרות
+      // עכשיו שהאריחים קטנים ורבים. דגימת-כהות דלילה על ה-RGBA הגולמי.
+      final raw = (await im.toByteData(format: ui.ImageByteFormat.rawRgba))!
+          .buffer
+          .asUint8List();
+      bool blank(ui.Rect r) {
+        var dark = 0, n = 0;
+        for (var y = r.top.toInt(); y < r.bottom.toInt(); y += 4) {
+          for (var x = r.left.toInt(); x < r.right.toInt(); x += 4) {
+            final o = (y * im.width + x) * 4;
+            final lum =
+                0.299 * raw[o] + 0.587 * raw[o + 1] + 0.114 * raw[o + 2];
+            if (lum < 160) dark++;
+            n++;
+          }
+        }
+        return n == 0 || dark / n < 0.002;
+      }
+
+      final all = _tileRects(im.width, im.height);
+      final rects = [
+        for (final r in all)
+          if (!blank(r)) r,
+      ];
       final normal = <OcrWord>[];
       final vertical = <OcrWord>[];
       final total = rects.length * 2;
@@ -156,7 +183,7 @@ class OcrService {
         }));
       }
       final n = _dedupWords(normal), v = _dedupWords(vertical);
-      debugPrint('[OCR] grid-labels: ${rects.length} tiles in '
+      debugPrint('[OCR] grid-labels: ${rects.length}/${all.length} tiles in '
           '${sw.elapsedMilliseconds}ms → ${n.length} normal + '
           '${v.length} vertical words');
       return (normal: n, vertical: v);
