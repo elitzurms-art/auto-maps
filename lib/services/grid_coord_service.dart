@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:isolate';
 import 'dart:ui' show Offset;
 
 import 'package:flutter/foundation.dart' show debugPrint;
@@ -89,35 +88,25 @@ class GridCoordService {
         .projectToWgs84(t.easting, t.northing, t.crs);
   }
 
-  /// **איתור-רשת אוטומטי** — בלי קליקים. מגדיל את התמונה ×3, מריץ OCR מלא
-  /// (רגיל→צפונים, מסובב 90°→מזרחים), מסנן מספרי-קואורדינטה **עגולים**
-  /// (כפולת-100, בטווח) שמבודדים את התוויות-האמיתיות מרעש-מספרי-מגרש, מזהה
-  /// CRS מהצפונים, ומזווג כל צפון למזרח הקרוב-ביותר → נקודות-בקרה. מחזיר
+  /// **איתור-רשת אוטומטי** — בלי קליקים. [OcrService.readGridLabels] קורא
+  /// את כל התוויות בשני הכיוונים (אריחי-Skia מוגדלים ×3, מהיר בכל
+  /// הפלטפורמות), כאן מסננים מספרי-קואורדינטה **עגולים** (כפולת-100,
+  /// בטווח) שמבודדים את התוויות-האמיתיות מרעש-מספרי-מגרש, מזהים CRS
+  /// מהצפונים, ומזווגים כל צפון למזרח הקרוב-ביותר → נקודות-בקרה. מחזיר
   /// רשימת (pixel, easting, northing, crs), או ריק אם לא נמצאו ≥2.
   static Future<List<({Offset pixel, double e, double n, String crs})>>
       autoDetectTicks(
-    img.Image src, {
+    String imagePath, {
     void Function(String status, double fraction)? onProgress,
   }) async {
-    // סקאלת-ההגדלה תלוית-מנוע: Tesseract (דסקטופ) צריך ×3; ‏ML Kit (מובייל)
-    // עובד ברזולוציית-המקור — וגם חייב, ×3 היה מפוצץ את זיכרון-המכשיר.
-    final scale = OcrService.autoScale;
-    final dir = Directory.systemTemp;
-    final nPath = '${dir.path}/_amauto_n.png';
-    final rPath = '${dir.path}/_amauto_r.png';
-    // ⚠️ ההגדלה + קידוד-ה-PNG הם עבודה **סינכרונית כבדה** (~שניות) —
-    // ב-Isolate כדי לא לתקוע את ה-UI (אחרת פס-ההתקדמות קופא).
-    onProgress?.call('שלב 1/4: מכין את התמונה…', 0.15);
-    final uw = await Isolate.run(() {
-      final up = scale == 1
-          ? src
-          : img.copyResize(src,
-              width: src.width * scale, interpolation: img.Interpolation.cubic);
-      File(nPath).writeAsBytesSync(img.encodePng(up));
-      File(rPath)
-          .writeAsBytesSync(img.encodePng(img.copyRotate(up, angle: -90)));
-      return up.width;
-    });
+    onProgress?.call('קורא תוויות (OCR)…', 0.05);
+    final labels = await OcrService.readGridLabels(
+      imagePath,
+      onTile: (done, total) => onProgress?.call(
+        'קורא תוויות (OCR)… $done/$total',
+        0.05 + 0.85 * done / total,
+      ),
+    );
 
     int? roundVal(String t) {
       final d = t.replaceAll(',', '').trim();
@@ -129,17 +118,15 @@ class GridCoordService {
     bool isNorthing(int v) =>
         (v >= 400000 && v <= 1300000) || (v >= 3000000 && v <= 4000000);
 
-    // מעבר-רגיל **פעם אחת** — ממנו גם צפונים וגם מזרחים-אופקיים.
-    onProgress?.call('שלב 2/4: קורא תוויות אופקיות (OCR)…', 0.35);
-    final normalWords = await OcrService.readWords(nPath);
+    // צפונים — כיתוב אופקי. (הקואורדינטות כבר בפיקסלי-המקור.)
     final norths = <({double v, Offset px})>[];
-    for (final w in normalWords) {
+    for (final w in labels.normal) {
       final v = roundVal(w.text);
       if (v != null && isNorthing(v)) {
-        norths.add((v: v.toDouble(), px: Offset(w.cx / scale, w.cy / scale)));
+        norths.add((v: v.toDouble(), px: Offset(w.cx, w.cy)));
       }
     }
-    debugPrint('[GRID] normal pass: ${normalWords.length} words → '
+    debugPrint('[GRID] normal: ${labels.normal.length} words → '
         '${norths.length} norths');
     if (norths.isEmpty) return const [];
     // CRS מהצפונים → טווח-המזרח המתאים (בלי חפיפה בין ITM ל-UTM).
@@ -147,27 +134,18 @@ class GridCoordService {
     bool isEasting(int v) =>
         utm ? (v >= 600000 && v <= 834000) : (v >= 100000 && v <= 300000);
 
+    // מזרחים — גם אופקיים (normal) וגם אנכיים (vertical, כבר ממופים).
     final easts = <({double v, Offset px})>[];
-    for (final w in normalWords) {
+    for (final w in [...labels.normal, ...labels.vertical]) {
       final v = roundVal(w.text);
       if (v != null && isEasting(v)) {
-        easts.add((v: v.toDouble(), px: Offset(w.cx / scale, w.cy / scale)));
+        easts.add((v: v.toDouble(), px: Offset(w.cx, w.cy)));
       }
     }
-    // מזרחים אנכיים מהמעבר-המסובב (-90° CCW): dst(dx,dy)→src(uw-1-dy, dx).
-    onProgress?.call('שלב 3/4: קורא תוויות אנכיות (OCR)…', 0.7);
-    for (final w in await OcrService.readWords(rPath)) {
-      final v = roundVal(w.text);
-      if (v != null && isEasting(v)) {
-        easts.add((
-          v: v.toDouble(),
-          px: Offset((uw - 1 - w.cy) / scale, w.cx / scale),
-        ));
-      }
-    }
-    debugPrint('[GRID] easts: ${easts.length} (utm=$utm)');
+    debugPrint('[GRID] easts: ${easts.length} '
+        '(utm=$utm, vertical words ${labels.vertical.length})');
     if (easts.isEmpty) return const [];
-    onProgress?.call('שלב 4/4: מזווג ומחשב…', 0.92);
+    onProgress?.call('מזווג ומחשב…', 0.95);
 
     // זיווג: לכל צפון, המזרח הקרוב-ביותר. הפיקסל = **הצטלבות הקווים**:
     // תווית-מזרח יושבת על הקו-האנכי שלה (X), תווית-צפון על הקו-האופקי (Y)

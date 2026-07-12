@@ -1786,28 +1786,23 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     });
     var ticks = const <({Offset pixel, double e, double n, String crs})>[];
     try {
-      final scan = await _ensureScanImage();
-      if (scan != null) {
-        // ⚠️ timeout קשיח — OCR (Tesseract) על תמונה מוגדלת ×3 יכול להיות
-        // איטי/להיתקע (Process.run בלי-timeout); גבול-עליון משחרר את הבר.
-        ticks = await GridCoordService.autoDetectTicks(
-          scan,
-          onProgress: (status, frac) {
-            if (!mounted || _autoCancelled) return;
-            setState(() {
-              _gridStage = status; // לאבחון — מוצג בבר-הרקע
-              if (!silent) _progressText = status;
-            });
-          },
-        ).timeout(
-          // ה-OCR (×3 הגדלה + Tesseract) איטי מטבעו על תמונה גדולה — דורש
-          // דקות, לא שניות. גבול נדיב (5 דק') רק כרשת-ביטחון מפני תקיעה
-          // אמיתית; לא חותך ריצה תקינה.
-          const Duration(minutes: 5),
-          onTimeout: () =>
-              const <({Offset pixel, double e, double n, String crs})>[],
-        );
-      }
+      // ⚠️ timeout קשיח — רשת-ביטחון מפני תקיעת-מנוע אמיתית (Process.run
+      // בלי-timeout). מאז מעבר הכנת-האריחים ל-Skia הריצה המלאה היא
+      // עשרות-שניות גם במובייל, אז 5 דק' רחוק מריצה תקינה.
+      ticks = await GridCoordService.autoDetectTicks(
+        widget.imagePath,
+        onProgress: (status, frac) {
+          if (!mounted || _autoCancelled) return;
+          setState(() {
+            _gridStage = status; // לאבחון — מוצג בבר-הרקע
+            if (!silent) _progressText = status;
+          });
+        },
+      ).timeout(
+        const Duration(minutes: 5),
+        onTimeout: () =>
+            const <({Offset pixel, double e, double n, String crs})>[],
+      );
     } catch (_) {}
     if (!mounted) return;
     setState(() {

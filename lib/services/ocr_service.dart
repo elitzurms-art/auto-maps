@@ -1,16 +1,26 @@
 import 'dart:io';
-import 'dart:isolate';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_tesseract_ocr/flutter_tesseract_ocr.dart';
-import 'package:image/image.dart' as img;
+
+/// מילה שזוהתה: טקסט + מרכז-תיבה בקואורדינטות התמונה המקורית.
+typedef OcrWord = ({String text, double cx, double cy});
 
 /// עטיפת-OCR לקריאת תוויות-קואורדינטה מודפסות ממפות-סקר/קדסטרליות
 /// (נתיב "רשת-קואורדינטות") — **Tesseract בכל הפלטפורמות** (זהות-מנוע):
 /// - **Windows/desktop** — tesseract.exe כ-subprocess (מצורף ליד ה-exe).
 /// - **Android/iOS** — Tesseract נייטיבי (flutter_tesseract_ocr) עם אותו
 ///   `eng.traineddata` בדיוק (‏assets/tessdata, זהה לבנדל-הדסקטופ).
+///
+/// **הכנת-התמונה ב-Skia** (`readGridLabels`): תוויות-רשת הן טקסט קטן
+/// שדורש הגדלה ×3, אבל הגדלת כל-התמונה מפוצצת זיכרון-מובייל וב-Dart
+/// (‏package:image) לוקחת דקות. לכן: אריחים חופפים, כל אריח מוגדל
+/// (ומסובב, למעבר-האנכי) ב-`Canvas.drawImageRect` — קוד נייטיבי, עשרות-
+/// מילישניות במקום שניות — וקידוד-PNG נייטיבי של Skia. רץ על ה-isolate
+/// הראשי (חובה ל-Skia/platform-channels); העבודה הכבדה כולה נייטיבית.
+///
 /// ⚠️ ML Kit נוסה (2026-07-12) ונפסל: על תוויות-מפה קטנות הוא גם איטי
 /// (דקות) וגם חלש (2 צפונים מ-466 מילים באושה, מול פענוח-מלא ב-Tesseract).
 class OcrService {
@@ -19,10 +29,6 @@ class OcrService {
   static String? _tessdataDir; // כשמשתמשים ב-Tesseract המצורף (Windows)
 
   static bool get _mobile => Platform.isAndroid || Platform.isIOS;
-
-  /// סקאלת-ההגדלה שמכין [GridCoordService] לאיתור-האוטומטי: בדסקטופ ×3
-  /// (התמונה כולה); במובייל 1 — ההגדלה נעשית כאן פר-אריח (זיכרון חסום).
-  static int get autoScale => _mobile ? 1 : 3;
 
   /// נתיב ל-tesseract.exe. סדר-עדיפות: **מצורף ליד ה-exe** (`tesseract/`,
   /// עצמאי — בלי התקנה) → מותקן (Program Files) → PATH. null אם לא נמצא.
@@ -76,49 +82,6 @@ class OcrService {
   static Future<bool> available() async =>
       _mobile || (await tesseractPath()) != null;
 
-  /// מריץ OCR עם תיבות-מילים — לכל מילה: טקסט + מרכז-פיקסל (בקואורדינטות
-  /// התמונה שנמסרה). משמש לאיתור-אוטומטי של תוויות-קואורדינטה. ריק בכשל.
-  static Future<List<({String text, double cx, double cy})>> readWords(
-    String imagePath, {
-    int psm = 11,
-  }) async {
-    if (_mobile) return _mobileWords(imagePath, psm: psm);
-    final t = await tesseractPath();
-    if (t == null) return const [];
-    final out = '${Directory.systemTemp.path}/_amtsv';
-    try {
-      // ⚠️ TSV דרך המשתנה tessedit_create_tsv=1 ולא דרך קונפיג-הקובץ 'tsv'
-      // — ה-Tesseract המצורף לא כולל את tessdata/configs/tsv (הועתק רק
-      // traineddata), אז הקונפיג 'tsv' לא נמצא והקובץ לא נוצר.
-      final r = await Process.run(t, [
-        imagePath,
-        out,
-        ..._tessdataArgs(),
-        '--psm',
-        '$psm',
-        '-c',
-        'tessedit_char_whitelist=0123456789,',
-        '-c',
-        'tessedit_create_tsv=1',
-      ]);
-      if (r.exitCode != 0) return const [];
-      final res = <({String text, double cx, double cy})>[];
-      for (final ln in File('$out.tsv').readAsLinesSync().skip(1)) {
-        final c = ln.split('\t');
-        if (c.length < 12) continue;
-        final text = c[11].trim();
-        if (text.isEmpty) continue;
-        final x = double.tryParse(c[6]), y = double.tryParse(c[7]);
-        final w = double.tryParse(c[8]), h = double.tryParse(c[9]);
-        if (x == null || y == null || w == null || h == null) continue;
-        res.add((text: text, cx: x + w / 2, cy: y + h / 2));
-      }
-      return res;
-    } catch (_) {
-      return const [];
-    }
-  }
-
   /// מריץ OCR על קובץ-תמונה עם whitelist-ספרות (+פסיק). מחזיר את הפלט
   /// הגולמי, או מחרוזת ריקה בכשל. [psm] — מצב-פילוח (7=שורה, 11=דליל).
   static Future<String> readDigits(String imagePath, {int psm = 11}) async {
@@ -155,82 +118,173 @@ class OcrService {
     }
   }
 
-  // ── מובייל: אריחים חופפים מוגדלים ×3 → Tesseract נייטיבי + hOCR ──
-  // תוויות-רשת הן טקסט קטן (~15-30px) שדורש הגדלה (כמו ×3 בדסקטופ), אבל
-  // הגדלת כל-התמונה מפוצצת זיכרון-מובייל — אז מגדילים פר-אריח. ‏BMP במקום
-  // PNG ואינטרפולציה לינארית — קידוד-PNG של אריחי-ענק ב-Dart היה צוואר-
-  // הבקבוק שהקפיץ את הריצה מעל ה-timeout.
+  // ── קריאת-תוויות מכל התמונה (איתור-הרשת האוטומטי) ──
   static const _tileSrc = 1100; // צלע-אריח בפיקסלי-מקור
   static const _tileOverlap = 220; // חפיפה — שתווית על-התפר לא תיחתך
-  static const _tileUpscale = 3;
+  static const _upscale = 3; // ההגדלה ש-Tesseract דורש לתוויות קטנות
 
-  static Future<List<({String text, double cx, double cy})>> _mobileWords(
-      String imagePath,
-      {required int psm}) async {
+  /// קורא את כל תוויות-התמונה בשני כיוונים — אופקי ([OcrWord] ב-normal)
+  /// ואנכי (vertical — כל אריח מסובב 90° כך שכיתוב-אנכי נהיה קריא) —
+  /// שניהם **בקואורדינטות התמונה המקורית**. [onTile] מדווח התקדמות.
+  static Future<({List<OcrWord> normal, List<OcrWord> vertical})>
+      readGridLabels(
+    String imagePath, {
+    int psm = 11,
+    void Function(int done, int total)? onTile,
+  }) async {
+    final sw = Stopwatch()..start();
+    final bytes = await File(imagePath).readAsBytes();
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    final im = frame.image;
+    codec.dispose();
     try {
-      final sw = Stopwatch()..start();
-      // הכנת-האריחים (פענוח/חיתוך/הגדלה/קידוד — כבד) ב-Isolate; קריאת
-      // ה-OCR (platform channel) על ה-isolate הראשי.
-      final tiles = await Isolate.run(() => _prepareTiles(imagePath));
-      final prepMs = sw.elapsedMilliseconds;
-      final words = <({String text, double cx, double cy})>[];
-      for (final t in tiles) {
+      final rects = _tileRects(im.width, im.height);
+      final normal = <OcrWord>[];
+      final vertical = <OcrWord>[];
+      final total = rects.length * 2;
+      var done = 0;
+      // דסקטופ = subprocess נפרד לכל אריח → אפשר לְמַקְבֵּל; מובייל =
+      // מופע-Tesseract יחיד בפלאגין → טורי.
+      final batch = _mobile ? 1 : 4;
+      for (var i = 0; i < rects.length; i += batch) {
+        await Future.wait(rects.skip(i).take(batch).map((r) async {
+          normal.addAll(await _ocrTile(im, r, rotated: false, psm: psm));
+          onTile?.call(++done, total);
+          vertical.addAll(await _ocrTile(im, r, rotated: true, psm: psm));
+          onTile?.call(++done, total);
+        }));
+      }
+      final n = _dedupWords(normal), v = _dedupWords(vertical);
+      debugPrint('[OCR] grid-labels: ${rects.length} tiles in '
+          '${sw.elapsedMilliseconds}ms → ${n.length} normal + '
+          '${v.length} vertical words');
+      return (normal: n, vertical: v);
+    } finally {
+      im.dispose();
+    }
+  }
+
+  /// רשת-האריחים החופפים המכסה את התמונה.
+  static List<ui.Rect> _tileRects(int w, int h) {
+    const step = _tileSrc - _tileOverlap;
+    final out = <ui.Rect>[];
+    for (var y0 = 0; y0 < h; y0 += step) {
+      for (var x0 = 0; x0 < w; x0 += step) {
+        final tw = math.min(_tileSrc, w - x0), th = math.min(_tileSrc, h - y0);
+        if ((tw < 80 || th < 80) && out.isNotEmpty) continue; // שאריות-שוליים
+        out.add(ui.Rect.fromLTWH(
+            x0.toDouble(), y0.toDouble(), tw.toDouble(), th.toDouble()));
+      }
+    }
+    return out;
+  }
+
+  /// מרנדר אריח מוגדל ×3 (ומסובב-CCW-90 במעבר-האנכי) ב-**Skia**, מריץ
+  /// עליו את המנוע, וממפה את מרכזי-המילים חזרה לקואורדינטות-המקור.
+  static Future<List<OcrWord>> _ocrTile(
+    ui.Image im,
+    ui.Rect r, {
+    required bool rotated,
+    required int psm,
+  }) async {
+    final wUp = (r.width * _upscale).roundToDouble();
+    final hUp = (r.height * _upscale).roundToDouble();
+    final rec = ui.PictureRecorder();
+    final canvas = ui.Canvas(rec);
+    if (rotated) {
+      // סיבוב-CCW-90 של התוכן: (x,y) → (y, wUp−x); ממדי-הפלט מתהפכים.
+      canvas.translate(0, wUp);
+      canvas.rotate(-math.pi / 2);
+    }
+    canvas.drawImageRect(
+      im,
+      r,
+      ui.Rect.fromLTWH(0, 0, wUp, hUp),
+      ui.Paint()..filterQuality = ui.FilterQuality.high,
+    );
+    final pic = rec.endRecording();
+    final tile = await pic.toImage(
+        (rotated ? hUp : wUp).round(), (rotated ? wUp : hUp).round());
+    pic.dispose();
+    final png = await tile.toByteData(format: ui.ImageByteFormat.png);
+    tile.dispose();
+    if (png == null) return const [];
+    final tp = '${Directory.systemTemp.path}/_amocr_'
+        '${rotated ? 'r' : 'n'}_${r.left.round()}_${r.top.round()}.png';
+    await File(tp).writeAsBytes(
+        png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes));
+    final words = await _wordsOfFile(tp, psm: psm);
+    // מיפוי חזרה: באריח-מסובב מילה ב-(cx,cy) ישבה במקור ב-(wUp−cy, cx).
+    return [
+      for (final w in words)
+        (
+          text: w.text,
+          cx: r.left + (rotated ? (wUp - w.cy) : w.cx) / _upscale,
+          cy: r.top + (rotated ? w.cx : w.cy) / _upscale,
+        ),
+    ];
+  }
+
+  /// מילים + מרכזי-תיבות מקובץ-תמונה (בקואורדינטות-הקובץ): דסקטופ — TSV
+  /// של tesseract.exe; מובייל — hOCR של הפלאגין הנייטיבי.
+  static Future<List<OcrWord>> _wordsOfFile(String imagePath,
+      {required int psm}) async {
+    if (_mobile) {
+      try {
         final hocr = await FlutterTesseractOcr.extractHocr(
-          t.path,
+          imagePath,
           language: 'eng',
           args: {
             'psm': '$psm',
             'tessedit_char_whitelist': '0123456789,',
           },
         );
-        words.addAll(_parseHocr(hocr, t.scale, t.offX, t.offY));
+        return _parseHocr(hocr);
+      } catch (e) {
+        debugPrint('[OCR] mobile extractHocr failed: $e');
+        return const [];
       }
-      final dedup = _dedupWords(words);
-      debugPrint('[OCR] tesseract-mobile: ${tiles.length} tiles, '
-          'prep ${prepMs}ms, ocr ${sw.elapsedMilliseconds - prepMs}ms → '
-          '${dedup.length} words');
-      return dedup;
-    } catch (e) {
-      debugPrint('[OCR] tesseract-mobile failed: $e');
+    }
+    final t = await tesseractPath();
+    if (t == null) return const [];
+    final out = '$imagePath.tsv_out';
+    try {
+      // ⚠️ TSV דרך המשתנה tessedit_create_tsv=1 ולא דרך קונפיג-הקובץ 'tsv'
+      // — ה-Tesseract המצורף לא כולל את tessdata/configs/tsv (הועתק רק
+      // traineddata), אז הקונפיג 'tsv' לא נמצא והקובץ לא נוצר.
+      final r = await Process.run(t, [
+        imagePath,
+        out,
+        ..._tessdataArgs(),
+        '--psm',
+        '$psm',
+        '-c',
+        'tessedit_char_whitelist=0123456789,',
+        '-c',
+        'tessedit_create_tsv=1',
+      ]);
+      if (r.exitCode != 0) return const [];
+      final res = <OcrWord>[];
+      for (final ln in File('$out.tsv').readAsLinesSync().skip(1)) {
+        final c = ln.split('\t');
+        if (c.length < 12) continue;
+        final text = c[11].trim();
+        if (text.isEmpty) continue;
+        final x = double.tryParse(c[6]), y = double.tryParse(c[7]);
+        final w = double.tryParse(c[8]), h = double.tryParse(c[9]);
+        if (x == null || y == null || w == null || h == null) continue;
+        res.add((text: text, cx: x + w / 2, cy: y + h / 2));
+      }
+      return res;
+    } catch (_) {
       return const [];
     }
   }
 
-  /// חותך את התמונה לאריחים מוגדלים ×3 וכותב אותם כ-BMP ל-temp — תמיד,
-  /// גם תמונה קטנה (אריח יחיד).
-  static List<({String path, double scale, int offX, int offY})>
-      _prepareTiles(String imagePath) {
-    final im = img.decodeImage(File(imagePath).readAsBytesSync());
-    if (im == null) return const [];
-    final out = <({String path, double scale, int offX, int offY})>[];
-    const step = _tileSrc - _tileOverlap;
-    var i = 0;
-    for (var y0 = 0; y0 < im.height; y0 += step) {
-      for (var x0 = 0; x0 < im.width; x0 += step) {
-        final w = math.min(_tileSrc, im.width - x0);
-        final h = math.min(_tileSrc, im.height - y0);
-        if ((w < 80 || h < 80) && i > 0) continue; // שאריות-שוליים זעירות
-        var crop = img.copyCrop(im, x: x0, y: y0, width: w, height: h);
-        crop = img.copyResize(crop,
-            width: w * _tileUpscale, interpolation: img.Interpolation.linear);
-        final tp = '${Directory.systemTemp.path}/_amocr_t${i++}.bmp';
-        File(tp).writeAsBytesSync(img.encodeBmp(crop));
-        out.add((
-          path: tp,
-          scale: _tileUpscale.toDouble(),
-          offX: x0,
-          offY: y0,
-        ));
-      }
-    }
-    return out;
-  }
-
-  /// פרסור hOCR: כל `ocrx_word` נושא `title="bbox x0 y0 x1 y1; ..."` —
-  /// ממפים את מרכז-התיבה חזרה לקואורדינטות-המקור של האריח.
-  static List<({String text, double cx, double cy})> _parseHocr(
-      String hocr, double scale, int offX, int offY) {
-    final out = <({String text, double cx, double cy})>[];
+  /// פרסור hOCR: כל `ocrx_word` נושא `title="bbox x0 y0 x1 y1; ..."`.
+  static List<OcrWord> _parseHocr(String hocr) {
+    final out = <OcrWord>[];
     final re = RegExp(
       r'''<span[^>]*class=.ocrx_word[^>]*title=.bbox (\d+) (\d+) (\d+) (\d+)[^>]*>(.*?)</span>''',
       dotAll: true,
@@ -244,19 +298,14 @@ class OcrService {
       if (text.isEmpty) continue;
       final x0 = int.parse(m.group(1)!), y0 = int.parse(m.group(2)!);
       final x1 = int.parse(m.group(3)!), y1 = int.parse(m.group(4)!);
-      out.add((
-        text: text,
-        cx: (x0 + x1) / 2 / scale + offX,
-        cy: (y0 + y1) / 2 / scale + offY,
-      ));
+      out.add((text: text, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2));
     }
     return out;
   }
 
   /// איחוד כפילויות מאזורי-החפיפה: אותו טקסט בטווח ~20px = אותה תווית.
-  static List<({String text, double cx, double cy})> _dedupWords(
-      List<({String text, double cx, double cy})> words) {
-    final out = <({String text, double cx, double cy})>[];
+  static List<OcrWord> _dedupWords(List<OcrWord> words) {
+    final out = <OcrWord>[];
     for (final w in words) {
       final dup = out.any((o) =>
           o.text == w.text &&
