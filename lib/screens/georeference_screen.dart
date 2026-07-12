@@ -17,6 +17,7 @@ import 'package:path_provider/path_provider.dart';
 import '../services/elevation_service.dart';
 import '../services/gdal_warp_service.dart';
 import '../services/gemini_anchor_service.dart';
+import '../services/terrain_names_service.dart';
 import '../services/grid_coord_service.dart';
 import '../services/ocr_service.dart';
 import '../services/reference_map_controller.dart';
@@ -95,6 +96,11 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   String? _roadStage; // שלב-נוכחי של מנוע-הכבישים
   bool _autoGridDone = false; // הרשת סיימה (עם/בלי תוצאה)
   bool _roadKicked = false; // מנוע-הכבישים הוזנק (פעם אחת, בסיום-הרשת)
+  bool _namesKicked = false; // מנוע-השמות הוזנק (פעם אחת, בסיום-הכבישים)
+  bool _autoNamesDone = false; // מנוע-השמות סיים (עם/בלי תוצאה)
+  bool _autoNamesRunning = false;
+  String? _namesStage; // חיווי-שלב של מנוע-השמות
+  List<GeminiAnchorSuggestion>? _autoNamesResult;
   late final Future<void> _hintFuture; // פתרון רמז-השם משם-הקובץ
   bool _autoRoadDone = false; // הכבישים סיימו
   bool _autoOffered = false; // הבוחר כבר הוצג (מונע כפילות)
@@ -993,8 +999,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   Widget _buildChooserView() {
     final grid = _autoGridResult;
     final road = _autoRoadResult;
+    final names = _autoNamesResult;
     final saved = _savedManualPoints;
-    final running = _autoRunning || _autoClassicalRunning;
+    final running =
+        _autoRunning || _autoClassicalRunning || _autoNamesRunning;
     return Directionality(
       textDirection: TextDirection.rtl,
       child: SafeArea(
@@ -1055,6 +1063,27 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                     }),
                     const SizedBox(height: 12),
                   ],
+                  if (names != null) ...[
+                    Builder(builder: (_) {
+                      final low = names.any((s) => s.confidence < 1);
+                      return FilledButton.icon(
+                        icon: const Icon(Icons.travel_explore),
+                        label: Text('שמות-מקומות (${names.length})'
+                            '${low ? ' — אמינות נמוכה' : ''}'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: low
+                              ? Colors.orange.shade800
+                              : Colors.deepPurple,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                        ),
+                        onPressed: () {
+                          setState(() => _showChooser = false);
+                          _openAdjustVerify(names);
+                        },
+                      );
+                    }),
+                    const SizedBox(height: 12),
+                  ],
                   // עבודה ידנית — **תמיד** (גם בהתחלה), ותמיד אחרונה.
                   OutlinedButton.icon(
                     icon: const Icon(Icons.back_hand_outlined),
@@ -1097,6 +1126,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                               style: TextStyle(color: Colors.grey, fontSize: 12)),
                         if (road == null && _autoRoadDone)
                           const Text('מנוע-הכבישים: לא נמצאה התאמה',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.grey, fontSize: 12)),
+                        if (names == null && _autoNamesDone)
+                          const Text('מנוע-השמות: לא נמצאו שמות עקביים',
                               textAlign: TextAlign.center,
                               style: TextStyle(color: Colors.grey, fontSize: 12)),
                       ],
@@ -1911,9 +1944,11 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   /// אם המשתמש עדיין לא נעץ ידנית — פותח מיד את מסך-הבחירה; אם כבר עובד
   /// ידנית — סנאקבר עדין 'הצג' (כפתור-החזור תמיד יחזיר לבוחר ממילא).
   void _maybeOfferAuto() {
-    if (!_autoGridDone || !_autoRoadDone) return;
+    if (!_autoGridDone || !_autoRoadDone || !_autoNamesDone) return;
     if (_autoOffered || !mounted) return;
-    if (_autoGridResult == null && _autoRoadResult == null) return;
+    if (_autoGridResult == null &&
+        _autoRoadResult == null &&
+        _autoNamesResult == null) return;
     _autoOffered = true;
     if (_points.any((p) => p.isComplete)) {
       ScaffoldMessenger.of(context)
@@ -1934,6 +1969,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     final lines = <String>[];
     if (_autoRunning) lines.add('רשת: ${_gridStage ?? '…'}');
     if (_autoClassicalRunning) lines.add('כבישים: ${_roadStage ?? '…'}');
+    if (_autoNamesRunning) lines.add('שמות: ${_namesStage ?? '…'}');
     return lines.join('\n');
   }
 
@@ -2023,12 +2059,46 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     });
   }
 
+  /// מזניק את מנוע-השמות **אחרי** מנוע-הכבישים (פעם אחת) — אותו עקרון-
+  /// רצף כמו רשת→כבישים: לא נלחמים על ליבות. ‏OCR-עברית → גזטיר-אופליין
+  /// (ונופל ל-Nominatim) → RANSAC → עוגנים.
+  void _startNamesEngineAfterRoads() {
+    if (_namesKicked || !mounted) return;
+    _namesKicked = true;
+    _autoNamesEngine();
+  }
+
+  Future<void> _autoNamesEngine() async {
+    setState(() {
+      _autoNamesRunning = true;
+      _namesStage = 'מתחיל…';
+    });
+    List<GeminiAnchorSuggestion>? names;
+    try {
+      names = await TerrainNamesService.suggestAnchors(
+        imagePath: widget.imagePath,
+        onStage: (s) {
+          if (mounted) setState(() => _namesStage = s);
+        },
+      ).timeout(const Duration(minutes: 3), onTimeout: () => null);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _autoNamesRunning = false;
+      _autoNamesDone = true;
+      _namesStage = null;
+      _autoNamesResult = names;
+    });
+    _maybeOfferAuto();
+  }
+
   /// מפעיל את מנוע-הכבישים ברקע אם יש רמז-שם; אחרת מסמן אותו כ"סיים" (בלי
   /// תוצאה) כדי שהבוחר עדיין יופיע עבור תוצאת-הרשת.
   void _kickRoadEngine() {
     if (!mounted) return;
     if (_hintName == null) {
       _autoRoadDone = true;
+      _startNamesEngineAfterRoads();
       _maybeOfferAuto();
       return;
     }
@@ -2079,6 +2149,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
           _autoRoadDone = true;
           _roadStage = null;
         });
+        _startNamesEngineAfterRoads();
         _maybeOfferAuto();
       }
     }

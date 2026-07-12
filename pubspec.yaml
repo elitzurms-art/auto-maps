@@ -124,10 +124,13 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # קובץ-השפה של Tesseract למובייל (זהה לבנדל-הדסקטופ) + הקונפיג שמפנה אליו.
+  # קבצי-השפה של Tesseract למובייל (זהים לבנדל-הדסקטופ) + הקונפיג שמפנה
+  # אליהם, וגזטיר-המקומות האופליין (מנוע שמות-המקומות; GeoNames-TSV).
   assets:
     - assets/tessdata/eng.traineddata
+    - assets/tessdata/heb.traineddata
     - assets/tessdata_config.json
+    - assets/gazetteer_il.txt
 
   # To add assets to your application, add an assets section, like this:
   # assets:

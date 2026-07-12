@@ -11,11 +11,18 @@ import 'dart:math' as math;
 import 'package:auto_maps/services/grid_coord_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-// אמת-הקרקע של מחוללי-המפות (make_test_map*.py).
+// אמת-הקרקע של מחוללי-המפות (tool/make_test_maps.py).
 const e0 = 205000.0, n0 = 742400.0;
 const stepM = 200.0, stepPx = 400.0, margin = 300.0;
 
-Future<void> runOn(String path, WidgetTester tester) async {
+Future<void> runOn(
+  String path,
+  WidgetTester tester, {
+  double e0v = e0,
+  double n0v = n0,
+  double stepMv = stepM,
+  double stepPxv = stepPx,
+}) async {
   if (!File(path).existsSync()) {
     markTestSkipped('אין מפת-בוחן ($path)');
     return;
@@ -30,8 +37,8 @@ Future<void> runOn(String path, WidgetTester tester) async {
     print('=== $path: ${sw.elapsedMilliseconds}ms, ${ticks.length} ticks');
     var maxErr = 0.0;
     for (final t in ticks) {
-      final ex = margin + (t.e - e0) / stepM * stepPx;
-      final ey = margin + (n0 - t.n) / stepM * stepPx;
+      final ex = margin + (t.e - e0v) / stepMv * stepPxv;
+      final ey = margin + (n0v - t.n) / stepMv * stepPxv;
       final err = math.sqrt(math.pow(t.pixel.dx - ex, 2) +
           math.pow(t.pixel.dy - ey, 2));
       maxErr = math.max(maxErr, err);
@@ -58,5 +65,9 @@ void main() {
   });
   testWidgets('מפה C — כיתוב-אנכי הפוך (נפילה-לאחור CW)', (tester) async {
     await runOn('$temp\\מפת_בוחן_הפוכה.png', tester);
+  });
+  testWidgets('מפה D — תוויות-ק"מ מקוצרות (מפה צבאית)', (tester) async {
+    await runOn('$temp\\מפת_בוחן_קמ.png', tester,
+        e0v: 205000, n0v: 742000, stepMv: 1000, stepPxv: 1000);
   });
 }

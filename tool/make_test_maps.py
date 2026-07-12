@@ -83,9 +83,49 @@ def build(name, margins_all, interior_norths, vertical_ccw):
     print(out, im.size)
 
 
+def build_km():
+    """גרסה D — תוויות-ק"מ מקוצרות (3 ספרות) כמו מפות צבאיות/1:50000:
+    רשת כל ק"מ (1000px @ 1מ'/px), מזרחים לאורך שורת-אמצע, צפונים לאורך
+    עמודת-אמצע, ורעש-גבהים (3 ספרות אקראיות!) שדורש את מסנן-השיפוע."""
+    im = Image.new("RGB", (W, H), (247, 244, 236))
+    d = ImageDraw.Draw(im)
+    e0_km, n0_km = 205, 742  # ITM
+    step_px = 1000  # 1 ק"מ במ'/px=1
+    for i in range(0, (W - 2 * MARGIN) // step_px + 1):
+        x = MARGIN + i * step_px
+        d.line([(x, MARGIN), (x, H - MARGIN)], fill=(60, 60, 60), width=2)
+    for j in range(0, (H - 2 * MARGIN) // step_px + 1):
+        y = MARGIN + j * step_px
+        d.line([(MARGIN, y), (W - MARGIN, y)], fill=(60, 60, 60), width=2)
+    # מזרחים לאורך שורת-אמצע (כמו רמת-רזיאל); צפונים בשולי-הגיליון
+    # (השמאלי+הימני) — שם פסק-דין-השוליים של הסריקה מוצא אותם.
+    mid_y = MARGIN + 1 * step_px + 380
+    for i in range(0, (W - 2 * MARGIN) // step_px + 1):
+        x = MARGIN + i * step_px
+        d.text((x - 32, mid_y - 50), str(e0_km + i), font=FONT_BIG,
+               fill=(40, 40, 40))
+    for j in range(0, (H - 2 * MARGIN) // step_px + 1):
+        y = MARGIN + j * step_px
+        d.text((70, y - 22), str(n0_km - j), font=FONT_BIG,
+               fill=(40, 40, 40))
+        d.text((W - 170, y - 22), str(n0_km - j), font=FONT_BIG,
+               fill=(40, 40, 40))
+    # רעש-גבהים: מספרי 3-ספרות אקראיים מפוזרים (חייבים ליפול במסנן-השיפוע)
+    random.seed(11)
+    for _ in range(60):
+        x = random.randint(MARGIN + 100, W - MARGIN - 100)
+        y = random.randint(MARGIN + 100, H - MARGIN - 100)
+        d.text((x, y), str(random.randint(120, 799)), font=FONT_SMALL,
+               fill=(90, 70, 50))
+    out = os.path.join(TEMP, "מפת_בוחן_קמ.png")
+    im.save(out)
+    print(out, im.size)
+
+
 build("מפת_בוחן_גדולה.png", margins_all=True, interior_norths=False,
       vertical_ccw=True)
 build("מפת_בוחן_פנימית.png", margins_all=False, interior_norths=True,
       vertical_ccw=True)
 build("מפת_בוחן_הפוכה.png", margins_all=True, interior_norths=False,
       vertical_ccw=False)
+build_km()

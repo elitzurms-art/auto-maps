@@ -78,14 +78,29 @@ class OcrService {
   }
 
   /// ארגומנטי-בסיס: כשמשתמשים ב-Tesseract המצורף מעבירים --tessdata-dir
-  /// (אין TESSDATA_PREFIX במערכת).
-  static List<String> _tessdataArgs() =>
-      _tessdataDir == null ? const [] : ['--tessdata-dir', _tessdataDir!];
+  /// (אין TESSDATA_PREFIX במערכת). ‏AUTO_MAPS_TESSDATA דורס — לטסטים
+  /// (ה-Tesseract המותקן ב-Program Files חסר את מודל-העברית).
+  static List<String> _tessdataArgs() {
+    final env = Platform.environment['AUTO_MAPS_TESSDATA'];
+    final td = (env != null && Directory(env).existsSync()) ? env : _tessdataDir;
+    return td == null ? const [] : ['--tessdata-dir', td];
+  }
 
   /// מנוע-OCR זמין? במובייל תמיד (Tesseract נייטיבי + tessdata ב-assets);
   /// בדסקטופ — אם נמצא tesseract.exe.
   static Future<bool> available() async =>
       _mobile || (await tesseractPath()) != null;
+
+  /// מידות-תמונה מהכותרת בלבד (בלי פענוח-פיקסלים) — לשערי-הסלמת-הגדלה.
+  static Future<(int, int)> imageSize(String path) async {
+    final buf = await ui.ImmutableBuffer.fromUint8List(
+        await File(path).readAsBytes());
+    final desc = await ui.ImageDescriptor.encoded(buf);
+    final size = (desc.width, desc.height);
+    desc.dispose();
+    buf.dispose();
+    return size;
+  }
 
   /// מריץ OCR על קובץ-תמונה עם whitelist-ספרות (+פסיק). מחזיר את הפלט
   /// הגולמי, או מחרוזת ריקה בכשל. [psm] — מצב-פילוח (7=שורה, 11=דליל).
@@ -123,6 +138,10 @@ class OcrService {
     }
   }
 
+  /// מזהה-ריצה לקובצי-האריחים הזמניים — שתי ריצות-מנוע חופפות (או שני
+  /// טסטים במקביל) עם אותם שמות-קבצים דורסות זו את זו וקוראות זבל.
+  static int _runSeq = 0;
+
   // ── קריאת-תוויות מכל התמונה (איתור-הרשת האוטומטי) ──
   // ⚠️ הכיול האמפירי (אושה): **אריח-ה-OCR** (אחרי הגדלה) חייב להיות
   // ≤ ~1650px — ב-psm 11 גוש-תוכן צפוף גורם ל-Tesseract לזרוק תווית
@@ -152,6 +171,7 @@ class OcrService {
     bool Function(String text)? looksLikeLabel,
   }) async {
     final sw = Stopwatch()..start();
+    final runId = _runSeq++;
     final bytes = await File(imagePath).readAsBytes();
     final codec = await ui.instantiateImageCodec(bytes);
     final frame = await codec.getNextFrame();
@@ -197,10 +217,10 @@ class OcrService {
         for (var i = 0; i < todo.length; i += batch) {
           await Future.wait(todo.skip(i).take(batch).map((r) async {
             normal.addAll(await _ocrTile(im, r,
-                rot: _TileRot.none, psm: psm, upscale: upscale));
+                rot: _TileRot.none, psm: psm, upscale: upscale, runId: runId));
             onTile?.call(++done, estTotal);
             vertical.addAll(await _ocrTile(im, r,
-                rot: _TileRot.ccw, psm: psm, upscale: upscale));
+                rot: _TileRot.ccw, psm: psm, upscale: upscale, runId: runId));
             onTile?.call(++done, estTotal);
           }));
         }
@@ -285,7 +305,7 @@ class OcrService {
           for (var i = 0; i < scanned.length; i += batch) {
             await Future.wait(scanned.skip(i).take(batch).map((s) async {
               vertical.addAll(await _ocrTile(im, s.$1,
-                  rot: _TileRot.cw, psm: psm, upscale: s.$2));
+                  rot: _TileRot.cw, psm: psm, upscale: s.$2, runId: runId));
               onTile?.call(++done, estTotal);
             }));
             if (enough()) break;
@@ -298,6 +318,97 @@ class OcrService {
           '${sw.elapsedMilliseconds}ms → ${n.length} normal + '
           '${v.length} vertical words');
       return (normal: n, vertical: v);
+    } finally {
+      im.dispose();
+    }
+  }
+
+  /// קריאת **טקסט-חופשי** (עברית) מכל התמונה באריחי-Skia — למנוע
+  /// שמות-המקומות. שמות מודפסים גדולים מספיק ברזולוציה טבעית — ‏×1
+  /// (נמדד: ‏×2 דווקא הרע את הקריאה); כיוון אופקי בלבד. מחזיר מילים
+  /// בקואורדינטות-המקור.
+  static Future<List<OcrWord>> readTextWords(
+    String imagePath, {
+    int psm = 11,
+    int upscale = 1,
+    void Function(int done, int total)? onTile,
+  }) async {
+    final sw = Stopwatch()..start();
+    final runId = _runSeq++;
+    final bytes = await File(imagePath).readAsBytes();
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    final im = frame.image;
+    codec.dispose();
+    try {
+      final raw = (await im.toByteData(format: ui.ImageByteFormat.rawRgba))!
+          .buffer
+          .asUint8List();
+      bool blank(ui.Rect r) {
+        var dark = 0, n = 0;
+        for (var y = r.top.toInt(); y < r.bottom.toInt(); y += 4) {
+          for (var x = r.left.toInt(); x < r.right.toInt(); x += 4) {
+            final o = (y * im.width + x) * 4;
+            final lum =
+                0.299 * raw[o] + 0.587 * raw[o + 1] + 0.114 * raw[o + 2];
+            if (lum < 160) dark++;
+            n++;
+          }
+        }
+        return n == 0 || dark / n < 0.002;
+      }
+
+      final rings = _tileRings(im.width, im.height, _ocrTilePx ~/ upscale, 200);
+      final rects = [
+        for (final ring in rings)
+          for (final r in ring)
+            if (!blank(r)) r,
+      ];
+      final words = <OcrWord>[];
+      final batch =
+          _mobile ? 2 : (Platform.numberOfProcessors - 2).clamp(4, 10);
+      var done = 0;
+      for (var i = 0; i < rects.length; i += batch) {
+        await Future.wait(rects.skip(i).take(batch).map((r) async {
+          final wUp = (r.width * upscale).roundToDouble();
+          final hUp = (r.height * upscale).roundToDouble();
+          final rec = ui.PictureRecorder();
+          ui.Canvas(rec).drawImageRect(
+            im,
+            r,
+            ui.Rect.fromLTWH(0, 0, wUp, hUp),
+            ui.Paint()..filterQuality = ui.FilterQuality.high,
+          );
+          final pic = rec.endRecording();
+          final tile = await pic.toImage(wUp.round(), hUp.round());
+          pic.dispose();
+          final png = await tile.toByteData(format: ui.ImageByteFormat.png);
+          tile.dispose();
+          if (png == null) return;
+          final tp = '${Directory.systemTemp.path}/_amtxt_${pid}_${runId}_'
+              '${r.left.round()}_${r.top.round()}.png';
+          await File(tp).writeAsBytes(
+              png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes));
+          // ⚠️ heb-בלבד: ערבוב heb+eng יוצר תחרות-כתבים ומרסק את הקריאה
+          // (נמדד: "הגדוד העברי"→"TITAN"); שמות-מפה בארץ עבריים ממילא.
+          final ws = await _wordsOfFile(tp,
+              psm: psm, lang: 'heb', digitsOnly: false);
+          words.addAll([
+            for (final w in ws)
+              (
+                text: w.text,
+                cx: r.left + w.cx / upscale,
+                cy: r.top + w.cy / upscale,
+                h: w.h / upscale,
+              ),
+          ]);
+          onTile?.call(++done, rects.length);
+        }));
+      }
+      final d = _dedupWords(words);
+      debugPrint('[OCR] text-words: ${rects.length} tiles in '
+          '${sw.elapsedMilliseconds}ms → ${d.length} words');
+      return d;
     } finally {
       im.dispose();
     }
@@ -364,6 +475,7 @@ class OcrService {
     required _TileRot rot,
     required int psm,
     required int upscale,
+    required int runId,
   }) async {
     final wUp = (r.width * upscale).roundToDouble();
     final hUp = (r.height * upscale).roundToDouble();
@@ -395,7 +507,7 @@ class OcrService {
     final png = await tile.toByteData(format: ui.ImageByteFormat.png);
     tile.dispose();
     if (png == null) return const [];
-    final tp = '${Directory.systemTemp.path}/_amocr_'
+    final tp = '${Directory.systemTemp.path}/_amocr_${pid}_${runId}_'
         '${rot.name}_${r.left.round()}_${r.top.round()}.png';
     await File(tp).writeAsBytes(
         png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes));
@@ -426,17 +538,23 @@ class OcrService {
   }
 
   /// מילים + מרכזי-תיבות מקובץ-תמונה (בקואורדינטות-הקובץ): דסקטופ — TSV
-  /// של tesseract.exe; מובייל — hOCR של הפלאגין הנייטיבי.
-  static Future<List<OcrWord>> _wordsOfFile(String imagePath,
-      {required int psm}) async {
+  /// של tesseract.exe; מובייל — hOCR של הפלאגין הנייטיבי. ברירת-המחדל —
+  /// מצב-ספרות (תוויות-רשת); ‏[lang]/[digitsOnly] פותחים טקסט-חופשי
+  /// (מנוע שמות-המקומות: ‏heb+eng בלי whitelist).
+  static Future<List<OcrWord>> _wordsOfFile(
+    String imagePath, {
+    required int psm,
+    String lang = 'eng',
+    bool digitsOnly = true,
+  }) async {
     if (_mobile) {
       try {
         final hocr = await FlutterTesseractOcr.extractHocr(
           imagePath,
-          language: 'eng',
+          language: lang,
           args: {
             'psm': '$psm',
-            'tessedit_char_whitelist': '0123456789,',
+            if (digitsOnly) 'tessedit_char_whitelist': '0123456789,',
           },
         );
         return _parseHocr(hocr);
@@ -456,10 +574,11 @@ class OcrService {
         imagePath,
         out,
         ..._tessdataArgs(),
+        '-l',
+        lang,
         '--psm',
         '$psm',
-        '-c',
-        'tessedit_char_whitelist=0123456789,',
+        if (digitsOnly) ...['-c', 'tessedit_char_whitelist=0123456789,'],
         '-c',
         'tessedit_create_tsv=1',
       ]);

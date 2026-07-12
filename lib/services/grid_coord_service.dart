@@ -159,7 +159,8 @@ class GridCoordService {
     }
     debugPrint('[GRID] normal: ${labels.normal.length} words → '
         '${norths.length} norths');
-    if (norths.isEmpty) return const [];
+    final allWords = [...labels.normal, ...labels.vertical];
+    if (norths.isEmpty) return _kmFallback(imagePath, allWords, onProgress);
     // CRS מהצפונים → טווח-המזרח המתאים (בלי חפיפה בין ITM ל-UTM).
     final utm = norths.any((n) => n.v >= 3000000);
     bool isEasting(int v) =>
@@ -175,7 +176,7 @@ class GridCoordService {
     }
     debugPrint('[GRID] easts: ${easts.length} '
         '(utm=$utm, vertical words ${labels.vertical.length})');
-    if (easts.isEmpty) return const [];
+    if (easts.isEmpty) return _kmFallback(imagePath, allWords, onProgress);
     onProgress?.call('מזווג ומחשב…', 0.95);
 
     // זיווג: לכל צפון, המזרח הקרוב-ביותר. הפיקסל = **הצטלבות הקווים**:
@@ -212,6 +213,200 @@ class GridCoordService {
     ].join(' | ')} '
         '(norths: ${norths.map((n) => n.v.round()).toList()}, '
         'easts: ${easts.map((e) => e.v.round()).toList()})');
+    if (ticks.length < 2) {
+      final km = await _kmFallback(imagePath, allWords, onProgress);
+      if (km.length >= 2) return km;
+    }
     return ticks;
+  }
+
+  /// נפילת-אחור למצב-ק"מ: קודם ניסיון ישיר על המילים שכבר נקראו; אם אין —
+  /// ובתנאי ששער-הכניסה מזהה חתימת-ק"מ (מונע עלות ממפות-כבישים שמלאות
+  /// מספרי-גבהים) — **מעבר-OCR שני מכויל-לתוויות-הק"מ**: הגישוש מודד את
+  /// גובהן וסורק בסקאלה הנכונה (×3 של המעבר-הראשון מרסק ספרות גדולות:
+  /// "742"→"142" — נמדד במפת-הבוחן).
+  static Future<List<({Offset pixel, double e, double n, String crs})>>
+      _kmFallback(
+    String imagePath,
+    List<OcrWord> firstWords,
+    void Function(String status, double fraction)? onProgress,
+  ) async {
+    final direct = kmTicks(firstWords);
+    if (direct.length >= 2) return direct;
+
+    int? kmVal(String t) {
+      final d = t.replaceAll(',', '').trim();
+      if (!RegExp(r'^\d{2,4}$').hasMatch(d)) return null;
+      return int.parse(d);
+    }
+
+    // שער-כניסה: חתימה של שני הצירים (מזרח+צפון) בטווחי-ק"מ — מספרי-גבהים
+    // לבדם (400-800) לא מזניקים מעבר-שני.
+    Set<int> inRange(int lo, int hi) => {
+          for (final w in firstWords)
+            if (kmVal(w.text) case final v? when v >= lo && v <= hi) v,
+        };
+    final itmStyle = inRange(120, 300).length >= 2; // מזרח-ITM ייחודי
+    final utmStyle =
+        inRange(600, 834).length >= 2 && inRange(3300, 3700).length >= 2;
+    if (!itmStyle && !utmStyle) return const [];
+
+    bool kmLabel(String t) {
+      final v = kmVal(t);
+      return v != null &&
+          ((v >= 120 && v <= 300) ||
+              (v >= 380 && v <= 834) ||
+              (v >= 3300 && v <= 3700));
+    }
+
+    bool kmEnough(List<OcrWord> normal, List<OcrWord> vertical) {
+      final all = [...normal, ...vertical];
+      Set<int> got(int lo, int hi) => {
+            for (final w in all)
+              if (kmVal(w.text) case final v? when v >= lo && v <= hi) v,
+          };
+      final e = got(120, 300).length >= 2 || got(600, 834).length >= 2;
+      final n = got(380, 800).length >= 2 || got(3300, 3700).length >= 2;
+      return e && n;
+    }
+
+    onProgress?.call('מעבר-ק"מ (OCR מכויל)…', 0.5);
+    final labels2 = await OcrService.readGridLabels(
+      imagePath,
+      onTile: (d, t) => onProgress?.call(
+        'מעבר-ק"מ (OCR)… $d/$t',
+        0.5 + 0.4 * (d / t).clamp(0.0, 1.0),
+      ),
+      isEnough: kmEnough,
+      looksLikeLabel: kmLabel,
+    );
+    return kmTicks([...labels2.normal, ...labels2.vertical]);
+  }
+
+  /// **מצב-ק"מ מקוצר** — מפות צבאיות/סימון-שבילים (1:50000) מתייגות את
+  /// הרשת בק"מ בני 2-4 ספרות ("154","156" / "3654") במקום מטרים מלאים.
+  /// מופעל כשהפורמט-המלא לא מצא: מסנן מועמדים לטווחי-ק"מ של ה-CRS,
+  /// ומאתר לכל ציר את **תת-הקבוצה בעלת השיפוע-העקבי** (תוויות-רשת יושבות
+  /// בקו עם מרווח-ערך קבוע; גבהים/מספרי-כביש מפוזרים אקראית ונופלים).
+  /// אימות-צולב: קנה-המידה משני הצירים חייב להסכים (פיקסלים ריבועיים).
+  static List<({Offset pixel, double e, double n, String crs})> kmTicks(
+      List<OcrWord> words) {
+    // מועמדים: מספר 2-4 ספרות שלם.
+    final cands = <({double v, Offset px})>[];
+    for (final w in words) {
+      final d = w.text.replaceAll(',', '').trim();
+      if (!RegExp(r'^\d{2,4}$').hasMatch(d)) continue;
+      cands.add((v: double.parse(d), px: Offset(w.cx, w.cy)));
+    }
+    debugPrint('[GRID] km-mode: ${cands.length} מועמדים '
+        '${cands.map((c) => c.v.round()).toList()}');
+    if (cands.length < 4) return const [];
+
+    // התאמת-ציר: **כל** תת-הקבוצות בעלות שיפוע-עקבי ומרווח-ק"מ אחיד
+    // (סדרה חשבונית 1-5, סובלנות לתווית-חסרה) — הבחירה הסופית נעשית
+    // כזוג-צולב (ראו למטה), לא פר-ציר.
+    List<(double slope, List<({double v, Offset px})>, double step)> fitAxis(
+      List<({double v, Offset px})> pool,
+      double Function(Offset) coord, {
+      required bool increasing,
+    }) {
+      final fits =
+          <(double, List<({double v, Offset px})>, double)>[];
+      final signatures = <String>{};
+      for (var i = 0; i < pool.length; i++) {
+        for (var j = i + 1; j < pool.length; j++) {
+          final dv = pool[j].v - pool[i].v;
+          if (dv == 0) continue;
+          final s = (coord(pool[j].px) - coord(pool[i].px)) / dv;
+          if (increasing ? s <= 0 : s >= 0) continue;
+          if (s.abs() < 20 || s.abs() > 6000) continue; // ק"מ = 20-6000px
+          final members = <double, ({double v, Offset px})>{};
+          for (final c in pool) {
+            final pred = coord(pool[i].px) + (c.v - pool[i].v) * s;
+            if ((coord(c.px) - pred).abs() <= 0.25 * s.abs()) {
+              // ערך כפול — שומרים את הקרוב-לחיזוי (תווית משני צדי-הגיליון).
+              final cur = members[c.v];
+              if (cur == null ||
+                  (coord(c.px) - pred).abs() <
+                      (coord(cur.px) - pred).abs()) {
+                members[c.v] = c;
+              }
+            }
+          }
+          if (members.length < 2) continue;
+          final vals = members.keys.toList()..sort();
+          var uniform = true;
+          final step = vals[1] - vals[0];
+          if (step < 1 || step > 5) uniform = false;
+          for (var k = 2; uniform && k < vals.length; k++) {
+            if ((vals[k] - vals[k - 1] - step).abs() > 0.01) uniform = false;
+          }
+          if (!uniform) continue;
+          if (!signatures.add(vals.join(','))) continue;
+          fits.add((s, members.values.toList(), step));
+          if (fits.length >= 60) return fits;
+        }
+      }
+      return fits;
+    }
+
+    // שתי השערות-CRS; ‏600-800 חופף (ITM-צפון/UTM-מזרח) — הניקוד מכריע.
+    final hypos = <({String name, double eLo, double eHi, double nLo, double nHi, double scale})>[
+      (name: 'ITM', eLo: 120, eHi: 300, nLo: 380, nHi: 800, scale: 1000),
+      (name: 'UTM', eLo: 600, eHi: 834, nLo: 3300, nHi: 3700, scale: 1000),
+    ];
+    List<({Offset pixel, double e, double n, String crs})> bestTicks =
+        const [];
+    var bestScore = 0;
+    for (final h in hypos) {
+      final ePool = [
+        for (final c in cands)
+          if (c.v >= h.eLo && c.v <= h.eHi) c,
+      ];
+      final nPool = [
+        for (final c in cands)
+          if (c.v >= h.nLo && c.v <= h.nHi) c,
+      ];
+      final eFits = fitAxis(ePool, (p) => p.dx, increasing: true);
+      final nFits = fitAxis(nPool, (p) => p.dy, increasing: false);
+      debugPrint('[GRID] km-mode ${h.name}: ePool=${ePool.length} '
+          'nPool=${nPool.length} → ${eFits.length}/${nFits.length} '
+          'התאמות-ציר');
+      // הבחירה הצולבת: **פיקסלים ריבועיים** (|px/km| שווה בשני הצירים)
+      // היא המפריד החזק — זוג-רעש כמעט אף פעם לא מסכים בקנה-מידה עם
+      // זוג-אמת בציר-השני. ניקוד: גודל + קרבת-יחס + עדיפות-מרווח-קטן.
+      for (final ef in eFits) {
+        for (final nf in nFits) {
+          final ratio = ef.$1.abs() / nf.$1.abs();
+          if (ratio < 0.85 || ratio > 1.18) continue;
+          final score = (ef.$2.length + nf.$2.length) * 100 -
+              ((ratio - 1).abs() * 200).round() -
+              (ef.$3 + nf.$3).round();
+          if (score <= bestScore) continue;
+          final crs = WorldFileParserService()
+              .detectCrs(ef.$2.first.v * h.scale, nf.$2.first.v * h.scale);
+          final ticks =
+              <({Offset pixel, double e, double n, String crs})>[];
+          for (final n in nf.$2) {
+            for (final e in ef.$2) {
+              if (ticks.length >= 12) break;
+              ticks.add((
+                pixel: Offset(e.px.dx, n.px.dy),
+                e: e.v * h.scale,
+                n: n.v * h.scale,
+                crs: crs,
+              ));
+            }
+          }
+          bestScore = score;
+          bestTicks = ticks;
+          debugPrint('[GRID] km-mode ${h.name}: '
+              'easts=${ef.$2.map((c) => c.v.round()).toList()} '
+              'norths=${nf.$2.map((c) => c.v.round()).toList()} '
+              '(px/km: ${ef.$1.round()}/${nf.$1.round()})');
+        }
+      }
+    }
+    return bestTicks;
   }
 }
