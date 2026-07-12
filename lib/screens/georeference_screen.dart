@@ -1021,25 +1021,33 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                       ),
                       onPressed: () {
                         setState(() => _showChooser = false);
-                        _applyGridTicks(grid);
+                        _openAdjustVerifyForGrid(grid);
                       },
                     ),
                     const SizedBox(height: 12),
                   ],
                   if (road != null) ...[
-                    FilledButton.icon(
-                      icon: const Icon(Icons.alt_route),
-                      label: Text('עוגני-כבישים '
-                          '(${road.where((s) => s.verified != false).length})'),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Colors.indigo,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                      ),
-                      onPressed: () {
-                        setState(() => _showChooser = false);
-                        _openAdjustVerify(road);
-                      },
-                    ),
+                    Builder(builder: (_) {
+                      // התאמה גבולית (שערי-האיכות במנוע) → כתום + אזהרה,
+                      // והעוגנים מגיעים לבנים (לא-מאומתים) למסך-האישור.
+                      final low =
+                          road.any((s) => s.confidence < 1);
+                      return FilledButton.icon(
+                        icon: const Icon(Icons.alt_route),
+                        label: Text('עוגני-כבישים '
+                            '(${road.where((s) => s.verified != false).length})'
+                            '${low ? ' — אמינות נמוכה' : ''}'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor:
+                              low ? Colors.orange.shade800 : Colors.indigo,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                        ),
+                        onPressed: () {
+                          setState(() => _showChooser = false);
+                          _openAdjustVerify(road);
+                        },
+                      );
+                    }),
                     const SizedBox(height: 12),
                   ],
                   // עבודה ידנית — **תמיד** (גם בהתחלה), ותמיד אחרונה.
@@ -1088,15 +1096,22 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                               style: TextStyle(color: Colors.grey, fontSize: 12)),
                       ],
                     ),
-                  // רשת-ביטחון: כשמנוע-הכבישים לא מצא (רמז שגוי/חסר), אפשר
-                  // להקליד שם-יישוב ולהריץ מחדש. (שטח-פתוח בלי כבישים → גריד/ידני.)
-                  if (!running && road == null && _autoRoadDone) ...[
+                  // רשת-ביטחון: כשמנוע-הכבישים לא מצא (רמז שגוי/חסר) —
+                  // **או מצא באמינות-נמוכה** (אולי יישוב שגוי משם-הקובץ) —
+                  // אפשר להקליד שם-יישוב ולהריץ מחדש.
+                  if (!running &&
+                      _autoRoadDone &&
+                      (road == null ||
+                          road.any((s) => s.confidence < 1))) ...[
                     const SizedBox(height: 20),
                     const Divider(),
                     const SizedBox(height: 8),
-                    const Text('לא נמצאו כבישים — נסה שם-יישוב:',
+                    Text(
+                        road == null
+                            ? 'לא נמצאו כבישים — נסה שם-יישוב:'
+                            : 'ההתאמה גבולית — אם היישוב שגוי, הקלד שם נכון:',
                         textAlign: TextAlign.center,
-                        style: TextStyle(fontSize: 13)),
+                        style: const TextStyle(fontSize: 13)),
                     const SizedBox(height: 8),
                     Row(
                       children: [
@@ -1734,7 +1749,17 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   /// הבסיס של הפונקציה ממילא) וגוזרים את קנה-המידה החסר מהציר הידוע:
   /// ‏mx = ‎-my (מזרח גדל ימינה, צפון גדל למעלה, py גדל למטה).
   void _synthesizeThirdGridPoint() {
-    final t0 = _gridTicks[0], t1 = _gridTicks[1];
+    final third = _deriveThirdTick(_gridTicks[0], _gridTicks[1]);
+    if (third == null) return;
+    _points.add(_ControlPoint(pixel: third.pixel)..world = third.world);
+  }
+
+  /// גזירת הנקודה-השלישית משני צלבים (המתמטיקה של [_synthesizeThirdGridPoint],
+  /// משותפת גם למסלול מסך-הכוונון-ואישור). null כשהזוג מנוון לגמרי.
+  ({Offset pixel, LatLng world})? _deriveThirdTick(
+    ({Offset pixel, double e, double n, String crs}) t0,
+    ({Offset pixel, double e, double n, String crs}) t1,
+  ) {
     final dpx = t1.pixel.dx - t0.pixel.dx, dpy = t1.pixel.dy - t0.pixel.dy;
     final double mx, my;
     if (dpx.abs() >= 5 && dpy.abs() >= 5) {
@@ -1749,9 +1774,9 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       mx = (t1.e - t0.e) / dpx;
       my = -mx;
     } else {
-      return; // אותה נקודה בפועל — אין ממה לגזור
+      return null; // אותה נקודה בפועל — אין ממה לגזור
     }
-    if (mx == 0 || my == 0) return;
+    if (mx == 0 || my == 0) return null;
     final bx = t0.e - mx * t0.pixel.dx, by = t0.n - my * t0.pixel.dy;
     // נקודה שלישית לא-קולינארית: פינה נגדית כשיש היטל בשני הצירים,
     // אחרת היסט קבוע על הציר החסר.
@@ -1762,7 +1787,48 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
             : Offset(t0.pixel.dx, t0.pixel.dy + 300));
     final e3 = mx * p3.dx + bx, n3 = my * p3.dy + by;
     final w3 = WorldFileParserService().projectToWgs84(e3, n3, t0.crs);
-    _points.add(_ControlPoint(pixel: p3)..world = w3);
+    return (pixel: p3, world: w3);
+  }
+
+  /// אפשרות-הרשת מה-hub — נפתחת ב**אותו** מסך כוונון-ואישור כמו הכבישים
+  /// (UX אחיד): כל צלב-רשת = עוגן מאומת (ירוק) שאפשר לבחון במיני-מפה,
+  /// "אשר וייצא" מייצא ישירות. 2 צלבים בלבד → עוגן-עזר שלישי נגזר
+  /// (הנחת פיקסלים-ריבועיים) כדי שה-affine והבלנד יעבדו; זוג מנוון →
+  /// המסלול הישן (החלה על מסך-הנעיצה) עם הסנאקבר המסביר.
+  Future<void> _openAdjustVerifyForGrid(
+      List<({Offset pixel, double e, double n, String crs})> ticks) async {
+    final wf = WorldFileParserService();
+    final sugg = <GeminiAnchorSuggestion>[
+      for (final t in ticks)
+        GeminiAnchorSuggestion(
+          pixel: t.pixel,
+          world: wf.projectToWgs84(t.e, t.n, t.crs),
+          name: 'צלב-רשת ${t.e.round()}/${t.n.round()}',
+          confidence: 1,
+          basis: 'תווית-קואורדינטה מודפסת (${t.crs})',
+          verified: true,
+          verifyNote: 'נקרא ב-OCR מהרשת המודפסת',
+          verifyKind: AnchorVerifyKind.geometric,
+        ),
+    ];
+    if (ticks.length == 2) {
+      final third = _deriveThirdTick(ticks[0], ticks[1]);
+      if (third == null) {
+        _applyGridTicks(ticks); // מנוון — נשארים במסלול הישן + הסבר
+        return;
+      }
+      sugg.add(GeminiAnchorSuggestion(
+        pixel: third.pixel,
+        world: third.world,
+        name: 'עוגן-עזר (נגזר)',
+        confidence: 1,
+        basis: 'נגזר משני הצלבים בהנחת פיקסלים-ריבועיים',
+        verified: null,
+        verifyNote: 'עוגן-עזר גיאומטרי — נדרש לחישוב; אל תמחק',
+        verifyKind: AnchorVerifyKind.geometric,
+      ));
+    }
+    await _openAdjustVerify(sugg);
   }
 
   /// **זיהוי-רשת אוטומטי** — מריץ OCR מלא, מזהה ומזווג את תוויות-הקואורדינטה

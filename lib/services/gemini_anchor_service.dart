@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'dart:math';
 import 'dart:ui' show Offset;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
 import 'package:latlong2/latlong.dart';
@@ -224,6 +225,8 @@ class GeminiAnchorService {
           compassDeg: compassDeg,
           compassResolved: compassResolved,
           deskew: deskewBundle,
+          imageWidth: imageWidth,
+          imageHeight: imageHeight,
         );
         if (classical != null && classical.length >= 4) {
           // סינון-שיורי רחב (90מ') — מפה סכמטית עשויה לסטות אמיתית; מה
@@ -429,6 +432,8 @@ class GeminiAnchorService {
     required List<bool> scanRound,
     required List<Point<double>> roadPointsScan,
     required String areaHint,
+    required int imageWidth,
+    required int imageHeight,
     bool exactNorth = false,
     double? compassDeg,
     bool compassResolved = false,
@@ -456,14 +461,31 @@ class GeminiAnchorService {
         ngrams.add(words.sublist(i, i + size).join(' '));
       }
     }
+    // מילות-סוג גנריות — כמועמד-יחיד הן מחזירות מקום שרירותי מ-Nominatim
+    // ("מושב נוב" → "מושב" לבדה פגעה ביישוב אקראי לפני שהשם "נוב" נוסה,
+    // והרישום רץ מול המקום הלא-נכון). בתוך צירוף ("כפר תבור") הן בסדר.
+    const genericWords = {
+      'מושב', 'קיבוץ', 'כפר', 'עיר', 'יישוב', 'ישוב', 'שכונה', 'גוש',
+      'חלקה', 'אזור', 'מחנה', 'בסיס', 'מפה', 'מפת', 'עותק', 'סריקה',
+      'צפון', 'דרום', 'מזרח', 'מערב', 'עמוד', //
+    };
     final seen = <String>{};
-    final candidates = [for (final c in ngrams) if (seen.add(c)) c].take(8);
+    final candidates = [
+      for (final c in ngrams)
+        if (seen.add(c) && !genericWords.contains(c)) c,
+    ].take(8);
     _Bbox? raw;
+    String? hitQuery;
     for (final q in candidates) {
       raw = await _geocode(q, settlementOnly: true) ??
           await _geocode(q, settlementOnly: false);
-      if (raw != null) break;
+      if (raw != null) {
+        hitQuery = q;
+        break;
+      }
     }
+    debugPrint('[ROAD] geocode "$areaHint" → '
+        '${raw == null ? 'נכשל (${candidates.length} מועמדים)' : 'נמצא: "$hitQuery"'}');
     if (raw == null) return null;
     final dLat = (raw.north - raw.south) * 0.15;
     final dLon = (raw.east - raw.west) * 0.15;
@@ -475,6 +497,9 @@ class GeminiAnchorService {
     );
     // איסוף-OSM **פעם אחת** — משותף לכל האסטרטגיות (בלי כפילות-רשת).
     final osm = await OverpassService.fetchJunctions(bbox);
+    debugPrint('[ROAD] overpass: ${osm.junctions.length} צמתי-OSM '
+        '(סריקה: ${junctionPx.length} צמתים, deskew: '
+        '${deskew?.junctions.length ?? 0})');
     if (osm.junctions.length < 4) return null;
     final refGeo = osm.junctions;
 
@@ -563,7 +588,43 @@ class GeminiAnchorService {
     // דורשים יחס-inliers סביר (יחסית לספירת-הצמתים של האסטרטגיה הזוכה) —
     // מגן מפני התאמה-חלקית מקרית.
     final minReq = max(4, (bestScanCount * 0.35).round());
-    if (best == null || best.inliers < minReq) return null;
+    if (best == null || best.inliers < minReq) {
+      debugPrint('[ROAD] רישום נכשל: '
+          '${best == null ? 'אין השערה' : 'inliers=${best.inliers} < $minReq'}');
+      return null;
+    }
+
+    // ── שערי-איכות נגד התאמת-שווא (מפה בלי רשת-כבישים אמיתית — מפת-גוש
+    // כמו אושה: הצטלבויות-מגרשים נראות כצמתים ו-RANSAC מוצא התאמת-מקרה) ──
+    // (1) חפיפת-כבישים: 0–40 מ' (רוויה ב-40); התאמה אמיתית ≈ 5–15 מ'.
+    // (2) פריסה: התאמת-מקרה נוטה להתקבץ — דורשים כיסוי-תמונה סביר.
+    final fit = best.roadFitMeters;
+    final origPts = [for (final m in best.matches) bestToOrig!(m.pixel)];
+    var minX = double.infinity, maxX = -double.infinity;
+    var minY = double.infinity, maxY = -double.infinity;
+    for (final p in origPts) {
+      minX = min(minX, p.dx);
+      maxX = max(maxX, p.dx);
+      minY = min(minY, p.dy);
+      maxY = max(maxY, p.dy);
+    }
+    final spanX = (maxX - minX) / imageWidth;
+    final spanY = (maxY - minY) / imageHeight;
+    final spreadOk = spanX >= 0.22 && spanY >= 0.22;
+    debugPrint('[ROAD] inliers=${best.inliers} (min=$minReq) '
+        'fit=${fit.isNaN ? 'NaN' : '${fit.toStringAsFixed(1)}m'} '
+        'span=${(spanX * 100).round()}%x${(spanY * 100).round()}%');
+    if (!fit.isNaN && fit > 30) return null; // חפיפת-כבישים ברמת-זבל
+    if (!spreadOk && best.inliers < minReq + 4) return null; // מקובץ וגם דל
+    // דירוג-אמון: רק התאמה חזקה מגיעה "מאומתת" (ירוק); גבולית מוצעת אבל
+    // לבנה במסך-האישור + "אמינות נמוכה" בכתום ב-hub.
+    // ⚠️ כיול אמפירי (נוב-אמיתי מול אושה-כוזב): חפיפת-הכבישים **לא**
+    // מפרידה (26.6 מול 26.2 — מפה סכמטית באמת סוטה עשרות-מטרים); מה
+    // שמפריד: פריסה (66%×67% מול 32%×45%) ומרווח-inliers (‏11/6 מול 7/5).
+    final strong = spanX >= 0.45 &&
+        spanY >= 0.45 &&
+        best.inliers >= minReq + 4 &&
+        (fit.isNaN || fit <= 30);
 
     return [
       for (final m in best.matches)
@@ -571,12 +632,16 @@ class GeminiAnchorService {
           pixel: bestToOrig!(m.pixel),
           world: m.world,
           name: m.isRoundabout ? 'כיכר' : 'צומת כבישים',
-          confidence: 1,
+          confidence: strong ? 1 : 0.5,
           basis: m.isRoundabout
               ? 'התאמת כיכר מול OSM'
               : 'התאמת רשת-כבישים מול OSM',
-          verified: true,
-          verifyNote: 'רישום גיאומטרי (RANSAC, ${best.inliers} התאמות)',
+          verified: strong ? true : null,
+          verifyNote: strong
+              ? 'רישום גיאומטרי (RANSAC, ${best.inliers} התאמות)'
+              : 'התאמה גבולית (חפיפת-כבישים '
+                  '${fit.isNaN ? 'לא-חושבה' : '${fit.toStringAsFixed(0)} מ׳'}) '
+                  '— בדוק במיני-מפה',
           verifyKind: AnchorVerifyKind.geometric,
         ),
     ];
