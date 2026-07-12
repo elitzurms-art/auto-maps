@@ -2,8 +2,9 @@
     <!-- נדרש להורדת אריחי OpenStreetMap (מפת-הייחוס) -->
     <uses-permission android:name="android.permission.INTERNET"/>
 
-    <!-- נדרש לצילום מפה במצלמת המכשיר -->
-    <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- צילום-מפה רץ דרך אפליקציית-המצלמה של המערכת (intent) — בלי הרשאת
+         CAMERA. ⚠️ אסור להכריז עליה כאן: הכרזה מחייבת בקשת-אישור בזמן-ריצה
+         (וכל session מחדש עם "רק הפעם"). -->
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
 
     <application

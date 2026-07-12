@@ -1,10 +1,11 @@
-import 'dart:io' show Platform;
+import 'dart:io' show Directory, Platform;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/geo_export_service.dart';
 import '../services/input_image_service.dart';
@@ -228,11 +229,42 @@ class _HomeScreenState extends State<HomeScreen> {
     final defaultName = p
         .basenameWithoutExtension(path)
         .replaceAll(RegExp(r'-עמוד\d+$'), '');
+    // תיקיית-היעד האחרונה נזכרת — הבורר (ומסך-האישור של אנדרואיד) מופיע
+    // רק בפעם הראשונה או כשמחליפים תיקייה.
+    final prefs = await SharedPreferences.getInstance();
+    var savedDir = prefs.getString('export_target_dir');
+    if (savedDir != null && !Directory(savedDir).existsSync()) savedDir = null;
+    if (!mounted) return;
     final params = await showDialog<_ExportParams>(
       context: context,
-      builder: (_) => _ExportDialog(defaultName: defaultName),
+      builder: (_) =>
+          _ExportDialog(defaultName: defaultName, initialDir: savedDir),
     );
     if (params == null) return;
+    await prefs.setString('export_target_dir', params.targetDir);
+    if (!mounted) return;
+
+    // דיאלוג-התקדמות חוסם — פירוס MBTiles/PMTiles יכול לקחת שניות ארוכות,
+    // ובלי חיווי נדמה שכלום לא קורה.
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const PopScope(
+        canPop: false,
+        child: Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            content: Row(
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(width: 16),
+                Expanded(child: Text('מייצא…')),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
 
     try {
       // ב-TPS מייצאים את הרסטר המיושר שנוצר, לא את המקור.
@@ -309,20 +341,56 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(
-          SnackBar(
-            content: Text('יוצא בהצלחה ל-${params.targetDir}:\n'
-                '${written.join(', ')}'),
-            duration: const Duration(seconds: 6),
+      Navigator.of(context, rootNavigator: true).pop(); // דיאלוג-ההתקדמות
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green),
+                SizedBox(width: 8),
+                Text('הייצוא הצליח'),
+              ],
+            ),
+            content: Text(
+              'נכתבו אל:\n${params.targetDir}\n\n${written.join('\n')}',
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('אישור'),
+              ),
+            ],
           ),
-        );
+        ),
+      );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(SnackBar(content: Text('שגיאת ייצוא: $e')));
+      Navigator.of(context, rootNavigator: true).pop(); // דיאלוג-ההתקדמות
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.error, color: Colors.red),
+                SizedBox(width: 8),
+                Text('שגיאת ייצוא'),
+              ],
+            ),
+            content: Text('$e'),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('אישור'),
+              ),
+            ],
+          ),
+        ),
+      );
     }
   }
 
@@ -516,7 +584,10 @@ class _ExportParams {
 
 class _ExportDialog extends StatefulWidget {
   final String defaultName;
-  const _ExportDialog({required this.defaultName});
+
+  /// תיקיית-היעד מהייצוא הקודם (נזכרת) — הבורר נפתח רק כשאין או כשמחליפים.
+  final String? initialDir;
+  const _ExportDialog({required this.defaultName, this.initialDir});
 
   @override
   State<_ExportDialog> createState() => _ExportDialogState();
@@ -526,7 +597,7 @@ class _ExportDialogState extends State<_ExportDialog> {
   late final TextEditingController _nameCtrl = TextEditingController(
     text: widget.defaultName,
   );
-  String? _targetDir;
+  late String? _targetDir = widget.initialDir;
   final Set<ExportFormat> _formats = {ExportFormat.liveMaps};
 
   @override
