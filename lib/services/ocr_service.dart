@@ -3,32 +3,25 @@ import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show debugPrint;
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:flutter_tesseract_ocr/flutter_tesseract_ocr.dart';
 import 'package:image/image.dart' as img;
 
-/// עטיפת-OCR **דו-מנועית** לקריאת תוויות-קואורדינטה מודפסות ממפות-סקר/
-/// קדסטרליות (נתיב "רשת-קואורדינטות"):
-/// - **Windows/desktop** — Tesseract כ-subprocess (מצורף ליד ה-exe, בלי
-///   התקנה; fallback ל-Program Files/PATH).
-/// - **Android/iOS** — ML Kit Text Recognition v2 (on-device, המודל הלטיני
-///   מצורף ל-APK — עובד בלי רשת ובלי הורדת-מודל).
-/// אותו API לשני המנועים — [GridCoordService] לא מבדיל ביניהם.
+/// עטיפת-OCR לקריאת תוויות-קואורדינטה מודפסות ממפות-סקר/קדסטרליות
+/// (נתיב "רשת-קואורדינטות") — **Tesseract בכל הפלטפורמות** (זהות-מנוע):
+/// - **Windows/desktop** — tesseract.exe כ-subprocess (מצורף ליד ה-exe).
+/// - **Android/iOS** — Tesseract נייטיבי (flutter_tesseract_ocr) עם אותו
+///   `eng.traineddata` בדיוק (‏assets/tessdata, זהה לבנדל-הדסקטופ).
+/// ⚠️ ML Kit נוסה (2026-07-12) ונפסל: על תוויות-מפה קטנות הוא גם איטי
+/// (דקות) וגם חלש (2 צפונים מ-466 מילים באושה, מול פענוח-מלא ב-Tesseract).
 class OcrService {
   static String? _cached;
   static bool _resolved = false;
-  static String? _tessdataDir; // כשמשתמשים ב-Tesseract המצורף
+  static String? _tessdataDir; // כשמשתמשים ב-Tesseract המצורף (Windows)
 
   static bool get _mobile => Platform.isAndroid || Platform.isIOS;
 
-  /// ML Kit — נוצר פעם אחת (טעינת-המודל יקרה). חייב לרוץ על ה-isolate
-  /// הראשי (platform channels) — וכך זה אצלנו: רק הכנת-התמונה ב-Isolate.
-  static TextRecognizer? _recognizer;
-  static TextRecognizer get _mlkit =>
-      _recognizer ??= TextRecognizer(script: TextRecognitionScript.latin);
-
-  /// סקאלת-ההגדלה לאיתור-האוטומטי של תוויות: Tesseract צריך ×3 לדיוק;
-  /// ל-ML Kit אין צורך — והוא גם הכרחי: ביטמאפ ×3 של מקור ~4500px היה
-  /// מפוצץ את זיכרון-המובייל.
+  /// סקאלת-ההגדלה שמכין [GridCoordService] לאיתור-האוטומטי: בדסקטופ ×3
+  /// (התמונה כולה); במובייל 1 — ההגדלה נעשית כאן פר-אריח (זיכרון חסום).
   static int get autoScale => _mobile ? 1 : 3;
 
   /// נתיב ל-tesseract.exe. סדר-עדיפות: **מצורף ליד ה-exe** (`tesseract/`,
@@ -78,17 +71,18 @@ class OcrService {
   static List<String> _tessdataArgs() =>
       _tessdataDir == null ? const [] : ['--tessdata-dir', _tessdataDir!];
 
-  /// מנוע-OCR זמין? במובייל תמיד (ML Kit מצורף); בדסקטופ — אם יש Tesseract.
+  /// מנוע-OCR זמין? במובייל תמיד (Tesseract נייטיבי + tessdata ב-assets);
+  /// בדסקטופ — אם נמצא tesseract.exe.
   static Future<bool> available() async =>
       _mobile || (await tesseractPath()) != null;
 
-  /// מריץ OCR עם תיבות-מילים — לכל מילה: טקסט + מרכז-פיקסל.
-  /// משמש לאיתור-אוטומטי של תוויות-קואורדינטה. ריק בכשל.
+  /// מריץ OCR עם תיבות-מילים — לכל מילה: טקסט + מרכז-פיקסל (בקואורדינטות
+  /// התמונה שנמסרה). משמש לאיתור-אוטומטי של תוויות-קואורדינטה. ריק בכשל.
   static Future<List<({String text, double cx, double cy})>> readWords(
     String imagePath, {
     int psm = 11,
   }) async {
-    if (_mobile) return _mlkitWords(imagePath);
+    if (_mobile) return _mobileWords(imagePath, psm: psm);
     final t = await tesseractPath();
     if (t == null) return const [];
     final out = '${Directory.systemTemp.path}/_amtsv';
@@ -125,16 +119,21 @@ class OcrService {
     }
   }
 
-  /// מריץ OCR על קובץ-תמונה. בדסקטופ — Tesseract עם whitelist-ספרות
-  /// (+פסיק); במובייל — ML Kit (בלי whitelist; הסינון הרגקספי אצל הקוראים).
-  /// מחזיר את הפלט הגולמי, או מחרוזת ריקה בכשל. [psm] — מצב-פילוח של
-  /// Tesseract (7=שורה, 11=דליל); לא רלוונטי ל-ML Kit.
+  /// מריץ OCR על קובץ-תמונה עם whitelist-ספרות (+פסיק). מחזיר את הפלט
+  /// הגולמי, או מחרוזת ריקה בכשל. [psm] — מצב-פילוח (7=שורה, 11=דליל).
   static Future<String> readDigits(String imagePath, {int psm = 11}) async {
     if (_mobile) {
       try {
-        final r = await _mlkit.processImage(InputImage.fromFilePath(imagePath));
-        return r.text;
-      } catch (_) {
+        return await FlutterTesseractOcr.extractText(
+          imagePath,
+          language: 'eng',
+          args: {
+            'psm': '$psm',
+            'tessedit_char_whitelist': '0123456789,',
+          },
+        );
+      } catch (e) {
+        debugPrint('[OCR] mobile extractText failed: $e');
         return '';
       }
     }
@@ -156,42 +155,49 @@ class OcrService {
     }
   }
 
-  // ── ML Kit: אריחים חופפים מוגדלים ×3 ──
-  // תוויות-רשת הן טקסט קטן (~15-30px) — ML Kit מפספס אותן ברזולוציה
-  // טבעית (בדיוק כמו ש-Tesseract שדרש ×3; אומת באושה: בלי הגדלה נקראו
-  // 260 מילים אבל רק תווית-קואורדינטה אחת שרדה). הגדלת כל התמונה מפוצצת
-  // זיכרון-מובייל, אז חותכים לאריחים חופפים ומגדילים כל אריח בנפרד —
-  // **תמיד**, גם בתמונה קטנה (אריח יחיד מוגדל).
-  static const _tileSrc = 1100; // צלע-אריח בפיקסלי-מקור (×3 → 3300px, ~43MB)
+  // ── מובייל: אריחים חופפים מוגדלים ×3 → Tesseract נייטיבי + hOCR ──
+  // תוויות-רשת הן טקסט קטן (~15-30px) שדורש הגדלה (כמו ×3 בדסקטופ), אבל
+  // הגדלת כל-התמונה מפוצצת זיכרון-מובייל — אז מגדילים פר-אריח. ‏BMP במקום
+  // PNG ואינטרפולציה לינארית — קידוד-PNG של אריחי-ענק ב-Dart היה צוואר-
+  // הבקבוק שהקפיץ את הריצה מעל ה-timeout.
+  static const _tileSrc = 1100; // צלע-אריח בפיקסלי-מקור
   static const _tileOverlap = 220; // חפיפה — שתווית על-התפר לא תיחתך
   static const _tileUpscale = 3;
 
-  /// מילים + מרכזי-תיבות מ-ML Kit (בקואורדינטות התמונה המקורית) —
-  /// מקביל אחד-לאחד לשורות ה-TSV של Tesseract.
-  static Future<List<({String text, double cx, double cy})>> _mlkitWords(
-      String imagePath) async {
+  static Future<List<({String text, double cx, double cy})>> _mobileWords(
+      String imagePath,
+      {required int psm}) async {
     try {
-      // הכנת-האריחים (פענוח/חיתוך/הגדלה/קידוד — כבד) ב-Isolate; קריאות
-      // ML Kit עצמן חייבות את ה-isolate הראשי (platform channels).
+      final sw = Stopwatch()..start();
+      // הכנת-האריחים (פענוח/חיתוך/הגדלה/קידוד — כבד) ב-Isolate; קריאת
+      // ה-OCR (platform channel) על ה-isolate הראשי.
       final tiles = await Isolate.run(() => _prepareTiles(imagePath));
+      final prepMs = sw.elapsedMilliseconds;
       final words = <({String text, double cx, double cy})>[];
       for (final t in tiles) {
-        words.addAll(await _mlkitFile(t.path, t.scale, t.offX, t.offY));
+        final hocr = await FlutterTesseractOcr.extractHocr(
+          t.path,
+          language: 'eng',
+          args: {
+            'psm': '$psm',
+            'tessedit_char_whitelist': '0123456789,',
+          },
+        );
+        words.addAll(_parseHocr(hocr, t.scale, t.offX, t.offY));
       }
       final dedup = _dedupWords(words);
-      final digitish =
-          dedup.where((w) => RegExp(r'^\d{6,7}$').hasMatch(w.text.replaceAll(',', ''))).length;
-      debugPrint('[OCR] mlkit: ${tiles.length} tiles → ${dedup.length} words '
-          '($digitish coord-like)');
+      debugPrint('[OCR] tesseract-mobile: ${tiles.length} tiles, '
+          'prep ${prepMs}ms, ocr ${sw.elapsedMilliseconds - prepMs}ms → '
+          '${dedup.length} words');
       return dedup;
     } catch (e) {
-      debugPrint('[OCR] mlkit failed: $e');
+      debugPrint('[OCR] tesseract-mobile failed: $e');
       return const [];
     }
   }
 
-  /// חותך את התמונה לאריחים מוגדלים ×3 וכותב אותם ל-temp — תמיד, גם
-  /// תמונה קטנה (אריח יחיד): בלי ההגדלה ML Kit מפספס את התוויות.
+  /// חותך את התמונה לאריחים מוגדלים ×3 וכותב אותם כ-BMP ל-temp — תמיד,
+  /// גם תמונה קטנה (אריח יחיד).
   static List<({String path, double scale, int offX, int offY})>
       _prepareTiles(String imagePath) {
     final im = img.decodeImage(File(imagePath).readAsBytesSync());
@@ -206,9 +212,9 @@ class OcrService {
         if ((w < 80 || h < 80) && i > 0) continue; // שאריות-שוליים זעירות
         var crop = img.copyCrop(im, x: x0, y: y0, width: w, height: h);
         crop = img.copyResize(crop,
-            width: w * _tileUpscale, interpolation: img.Interpolation.cubic);
-        final tp = '${Directory.systemTemp.path}/_amocr_t${i++}.png';
-        File(tp).writeAsBytesSync(img.encodePng(crop));
+            width: w * _tileUpscale, interpolation: img.Interpolation.linear);
+        final tp = '${Directory.systemTemp.path}/_amocr_t${i++}.bmp';
+        File(tp).writeAsBytesSync(img.encodeBmp(crop));
         out.add((
           path: tp,
           scale: _tileUpscale.toDouble(),
@@ -220,34 +226,29 @@ class OcrService {
     return out;
   }
 
-  /// ML Kit על קובץ יחיד; ממפה מרכזים חזרה לקואורדינטות-המקור. בנוסף
-  /// לאלמנטים (מילים) נוסף מועמד ברמת-שורה: תווית מפוצלת ("735 000")
-  /// מתאחה לספרות רצופות — Tesseract עם whitelist לא סבל מזה, ML Kit כן.
-  static Future<List<({String text, double cx, double cy})>> _mlkitFile(
-      String path, double scale, int offX, int offY) async {
-    final r = await _mlkit.processImage(InputImage.fromFilePath(path));
+  /// פרסור hOCR: כל `ocrx_word` נושא `title="bbox x0 y0 x1 y1; ..."` —
+  /// ממפים את מרכז-התיבה חזרה לקואורדינטות-המקור של האריח.
+  static List<({String text, double cx, double cy})> _parseHocr(
+      String hocr, double scale, int offX, int offY) {
     final out = <({String text, double cx, double cy})>[];
-    for (final block in r.blocks) {
-      for (final line in block.lines) {
-        final joined = line.text.replaceAll(RegExp(r'[^0-9]'), '');
-        if (line.elements.length > 1 &&
-            RegExp(r'^\d{6,7}$').hasMatch(joined)) {
-          out.add((
-            text: joined,
-            cx: line.boundingBox.center.dx / scale + offX,
-            cy: line.boundingBox.center.dy / scale + offY,
-          ));
-        }
-        for (final el in line.elements) {
-          final t = el.text.trim();
-          if (t.isEmpty) continue;
-          out.add((
-            text: t,
-            cx: el.boundingBox.center.dx / scale + offX,
-            cy: el.boundingBox.center.dy / scale + offY,
-          ));
-        }
-      }
+    final re = RegExp(
+      r'''<span[^>]*class=.ocrx_word[^>]*title=.bbox (\d+) (\d+) (\d+) (\d+)[^>]*>(.*?)</span>''',
+      dotAll: true,
+    );
+    for (final m in re.allMatches(hocr)) {
+      final text = m
+          .group(5)!
+          .replaceAll(RegExp(r'<[^>]+>'), '')
+          .replaceAll('&amp;', '&')
+          .trim();
+      if (text.isEmpty) continue;
+      final x0 = int.parse(m.group(1)!), y0 = int.parse(m.group(2)!);
+      final x1 = int.parse(m.group(3)!), y1 = int.parse(m.group(4)!);
+      out.add((
+        text: text,
+        cx: (x0 + x1) / 2 / scale + offX,
+        cy: (y0 + y1) / 2 / scale + offY,
+      ));
     }
     return out;
   }
