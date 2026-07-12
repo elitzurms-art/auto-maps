@@ -1727,15 +1727,39 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   }
 
   /// מ-2 צלבי-רשת גוזר affine-צירי (E=mx·px+bx, N=my·py+by) ומוסיף נקודת-
-  /// בקרה שלישית עקבית (בפינה הנגדית של המלבן) — כך הרישום מדויק-לחלוטין
-  /// גם עם 2 קריאות בלבד.
+  /// בקרה שלישית עקבית — כך הרישום מדויק גם עם 2 קריאות בלבד.
+  ///
+  /// כששני הצלבים חולקים ציר (מקרה-אושה: שתי תוויות-צפון שזווגו למזרח
+  /// יחיד → אותו X) — מניחים **פיקסלים ריבועיים** ומפה מיושרת-צפון (הנחת-
+  /// הבסיס של הפונקציה ממילא) וגוזרים את קנה-המידה החסר מהציר הידוע:
+  /// ‏mx = ‎-my (מזרח גדל ימינה, צפון גדל למעלה, py גדל למטה).
   void _synthesizeThirdGridPoint() {
     final t0 = _gridTicks[0], t1 = _gridTicks[1];
     final dpx = t1.pixel.dx - t0.pixel.dx, dpy = t1.pixel.dy - t0.pixel.dy;
-    if (dpx.abs() < 5 || dpy.abs() < 5) return; // כמעט על אותו ציר — לא ניתן
-    final mx = (t1.e - t0.e) / dpx, bx = t0.e - (t1.e - t0.e) / dpx * t0.pixel.dx;
-    final my = (t1.n - t0.n) / dpy, by = t0.n - (t1.n - t0.n) / dpy * t0.pixel.dy;
-    final p3 = Offset(t1.pixel.dx, t0.pixel.dy); // פינה נגדית
+    final double mx, my;
+    if (dpx.abs() >= 5 && dpy.abs() >= 5) {
+      mx = (t1.e - t0.e) / dpx;
+      my = (t1.n - t0.n) / dpy;
+    } else if (dpy.abs() >= 5) {
+      // זוג-אנכי — סקאלת-Y ידועה, X מהנחת-הריבועיות.
+      my = (t1.n - t0.n) / dpy;
+      mx = -my;
+    } else if (dpx.abs() >= 5) {
+      // זוג-אופקי — סקאלת-X ידועה, Y מהנחת-הריבועיות.
+      mx = (t1.e - t0.e) / dpx;
+      my = -mx;
+    } else {
+      return; // אותה נקודה בפועל — אין ממה לגזור
+    }
+    if (mx == 0 || my == 0) return;
+    final bx = t0.e - mx * t0.pixel.dx, by = t0.n - my * t0.pixel.dy;
+    // נקודה שלישית לא-קולינארית: פינה נגדית כשיש היטל בשני הצירים,
+    // אחרת היסט קבוע על הציר החסר.
+    final p3 = (dpx.abs() >= 5 && dpy.abs() >= 5)
+        ? Offset(t1.pixel.dx, t0.pixel.dy)
+        : (dpy.abs() >= 5
+            ? Offset(t0.pixel.dx + 300, t0.pixel.dy)
+            : Offset(t0.pixel.dx, t0.pixel.dy + 300));
     final e3 = mx * p3.dx + bx, n3 = my * p3.dy + by;
     final w3 = WorldFileParserService().projectToWgs84(e3, n3, t0.crs);
     _points.add(_ControlPoint(pixel: p3)..world = w3);
@@ -1893,6 +1917,16 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
     });
     if (_gridTicks.length == 2) _synthesizeThirdGridPoint();
     _calculate();
+    // בלי 3 נקודות שמישות _calculate שותק — אל תשאיר את המשתמש בלי הסבר.
+    if (_result == null && mounted) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(
+          content: Text('נקראו רק ${_gridTicks.length} צלבי-רשת — לא מספיק '
+              'לחישוב. הקש ידנית על צלב-רשת נוסף (המספרים בשולי המפה).'),
+          duration: const Duration(seconds: 6),
+        ));
+    }
   }
 
   /// הרצה-חוזרת של מנוע-הכבישים עם שם-אזור שהמשתמש הקליד ב-hub (רשת-ביטחון

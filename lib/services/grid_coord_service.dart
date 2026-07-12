@@ -169,8 +169,11 @@ class GridCoordService {
     if (easts.isEmpty) return const [];
     onProgress?.call('שלב 4/4: מזווג ומחשב…', 0.92);
 
-    // זיווג: לכל צפון, המזרח הקרוב-ביותר (אותה פינת-רשת). הפיקסל = אמצע
-    // בין שתי התוויות (≈ פינת-הצלב, שגיאה זניחה).
+    // זיווג: לכל צפון, המזרח הקרוב-ביותר. הפיקסל = **הצטלבות הקווים**:
+    // תווית-מזרח יושבת על הקו-האנכי שלה (X), תווית-צפון על הקו-האופקי (Y)
+    // → הצלב ב-(east.x, north.y). כשהתוויות צמודות לצומת זה שקול לאמצע;
+    // כשהן רחוקות (תוויות-שוליים, מזרח-יחיד כמו באושה) האמצע שגוי בחצי-
+    // המרחק וההצטלבות נכונה.
     final crs = WorldFileParserService().detectCrs(
       easts.first.v,
       norths.first.v,
@@ -188,7 +191,7 @@ class GridCoordService {
       }
       if (best == null) continue;
       ticks.add((
-        pixel: Offset((nrt.px.dx + best.px.dx) / 2, (nrt.px.dy + best.px.dy) / 2),
+        pixel: Offset(best.px.dx, nrt.px.dy),
         e: best.v,
         n: nrt.v,
         crs: crs,
