@@ -241,6 +241,9 @@ class _HomeScreenState extends State<HomeScreen> {
           _ExportDialog(defaultName: defaultName, initialDir: savedDir),
     );
     if (params == null) return;
+    // הסיומת " LiveMaps" נוספת אוטומטית לשם בפועל (קבצים + שם-שכבה) כדי
+    // שהשכבה תזוהה ב-LiveMaps; ה-UI בדיאלוג נשאר עם השם הנקי שהוקלד.
+    final exportName = '${params.name} LiveMaps';
     await prefs.setString('export_target_dir', params.targetDir);
     if (!mounted) return;
 
@@ -271,7 +274,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final srcImage = outcome.warpedImagePath ?? path;
       final corners = outcome.result.cornersWgs84 ??
           _cornersFromBbox(outcome.result);
-      final base = _sanitize(params.name);
+      final base = _sanitize(exportName);
       final pngPath = p.join(params.targetDir, '$base.png');
       final written = <String>[];
 
@@ -280,7 +283,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final out = await _exportService.export(
           sourceImagePath: srcImage,
           result: outcome.result,
-          name: params.name,
+          name: exportName,
           targetDir: params.targetDir,
           transform: outcome.transform,
         );
@@ -304,7 +307,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final kmz = await GeoExportService.writeKmz(
           pngPath: pngPath,
           corners: corners,
-          name: params.name,
+          name: exportName,
           kmzPath: p.join(params.targetDir, '$base.kmz'),
         );
         written.add(p.basename(kmz));
@@ -324,7 +327,7 @@ class _HomeScreenState extends State<HomeScreen> {
         mbtilesOut = await GeoExportService.writeMbtiles(
           pngPath: pngPath,
           corners: corners,
-          name: params.name,
+          name: exportName,
           mbtilesPath: p.join(params.targetDir, '$base.mbtiles'),
         );
         written.add(p.basename(mbtilesOut));
@@ -333,7 +336,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final pm = await GeoExportService.writePmtiles(
           pngPath: pngPath,
           corners: corners,
-          name: params.name,
+          name: exportName,
           pmtilesPath: p.join(params.targetDir, '$base.pmtiles'),
           existingMbtilesPath: mbtilesOut,
         );
