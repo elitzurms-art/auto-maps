@@ -156,13 +156,15 @@ class OcrService {
     }
   }
 
-  // ── ML Kit: אריחים חופפים מוגדלים ×2 ──
-  // תוויות-רשת הן טקסט קטן (~20-30px) — ML Kit מפספס אותן ברזולוציה
-  // טבעית (בדיוק כמו ש-Tesseract דרש ×3). הגדלת כל התמונה ×2 מפוצצת
-  // זיכרון-מובייל, אז חותכים לאריחים חופפים ומגדילים כל אריח בנפרד.
-  static const _tileSrc = 1500; // צלע-אריח בפיקסלי-מקור
-  static const _tileOverlap = 250; // חפיפה — שתווית על-התפר לא תיחתך
-  static const _tileUpscale = 2;
+  // ── ML Kit: אריחים חופפים מוגדלים ×3 ──
+  // תוויות-רשת הן טקסט קטן (~15-30px) — ML Kit מפספס אותן ברזולוציה
+  // טבעית (בדיוק כמו ש-Tesseract שדרש ×3; אומת באושה: בלי הגדלה נקראו
+  // 260 מילים אבל רק תווית-קואורדינטה אחת שרדה). הגדלת כל התמונה מפוצצת
+  // זיכרון-מובייל, אז חותכים לאריחים חופפים ומגדילים כל אריח בנפרד —
+  // **תמיד**, גם בתמונה קטנה (אריח יחיד מוגדל).
+  static const _tileSrc = 1100; // צלע-אריח בפיקסלי-מקור (×3 → 3300px, ~43MB)
+  static const _tileOverlap = 220; // חפיפה — שתווית על-התפר לא תיחתך
+  static const _tileUpscale = 3;
 
   /// מילים + מרכזי-תיבות מ-ML Kit (בקואורדינטות התמונה המקורית) —
   /// מקביל אחד-לאחד לשורות ה-TSV של Tesseract.
@@ -188,15 +190,12 @@ class OcrService {
     }
   }
 
-  /// חותך את התמונה לאריחים מוגדלים וכותב אותם ל-temp. תמונה קטנה —
-  /// עוברת כמו-שהיא (למשל חלונות-הקליק של readTick, שכבר מוגדלים ×4).
+  /// חותך את התמונה לאריחים מוגדלים ×3 וכותב אותם ל-temp — תמיד, גם
+  /// תמונה קטנה (אריח יחיד): בלי ההגדלה ML Kit מפספס את התוויות.
   static List<({String path, double scale, int offX, int offY})>
       _prepareTiles(String imagePath) {
     final im = img.decodeImage(File(imagePath).readAsBytesSync());
     if (im == null) return const [];
-    if (im.width <= 2200 && im.height <= 2200) {
-      return [(path: imagePath, scale: 1.0, offX: 0, offY: 0)];
-    }
     final out = <({String path, double scale, int offX, int offY})>[];
     const step = _tileSrc - _tileOverlap;
     var i = 0;
@@ -204,7 +203,7 @@ class OcrService {
       for (var x0 = 0; x0 < im.width; x0 += step) {
         final w = math.min(_tileSrc, im.width - x0);
         final h = math.min(_tileSrc, im.height - y0);
-        if (w < 80 || h < 80) continue;
+        if ((w < 80 || h < 80) && i > 0) continue; // שאריות-שוליים זעירות
         var crop = img.copyCrop(im, x: x0, y: y0, width: w, height: h);
         crop = img.copyResize(crop,
             width: w * _tileUpscale, interpolation: img.Interpolation.cubic);
