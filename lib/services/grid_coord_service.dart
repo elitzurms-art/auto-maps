@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:ui' show Offset;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:image/image.dart' as img;
 import 'package:latlong2/latlong.dart';
 
@@ -138,6 +139,8 @@ class GridCoordService {
         norths.add((v: v.toDouble(), px: Offset(w.cx / scale, w.cy / scale)));
       }
     }
+    debugPrint('[GRID] normal pass: ${normalWords.length} words → '
+        '${norths.length} norths');
     if (norths.isEmpty) return const [];
     // CRS מהצפונים → טווח-המזרח המתאים (בלי חפיפה בין ITM ל-UTM).
     final utm = norths.any((n) => n.v >= 3000000);
@@ -162,6 +165,7 @@ class GridCoordService {
         ));
       }
     }
+    debugPrint('[GRID] easts: ${easts.length} (utm=$utm)');
     if (easts.isEmpty) return const [];
     onProgress?.call('שלב 4/4: מזווג ומחשב…', 0.92);
 
