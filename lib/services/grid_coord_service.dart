@@ -98,16 +98,20 @@ class GridCoordService {
     img.Image src, {
     void Function(String status, double fraction)? onProgress,
   }) async {
-    const scale = 3;
+    // סקאלת-ההגדלה תלוית-מנוע: Tesseract (דסקטופ) צריך ×3; ‏ML Kit (מובייל)
+    // עובד ברזולוציית-המקור — וגם חייב, ×3 היה מפוצץ את זיכרון-המכשיר.
+    final scale = OcrService.autoScale;
     final dir = Directory.systemTemp;
     final nPath = '${dir.path}/_amauto_n.png';
     final rPath = '${dir.path}/_amauto_r.png';
-    // ⚠️ ההגדלה (×3 → ~5760px) + קידוד-ה-PNG הם עבודה **סינכרונית כבדה**
-    // (~שניות) — ב-Isolate כדי לא לתקוע את ה-UI (אחרת פס-ההתקדמות קופא).
-    onProgress?.call('שלב 1/4: מגדיל את התמונה…', 0.15);
+    // ⚠️ ההגדלה + קידוד-ה-PNG הם עבודה **סינכרונית כבדה** (~שניות) —
+    // ב-Isolate כדי לא לתקוע את ה-UI (אחרת פס-ההתקדמות קופא).
+    onProgress?.call('שלב 1/4: מכין את התמונה…', 0.15);
     final uw = await Isolate.run(() {
-      final up = img.copyResize(src,
-          width: src.width * scale, interpolation: img.Interpolation.cubic);
+      final up = scale == 1
+          ? src
+          : img.copyResize(src,
+              width: src.width * scale, interpolation: img.Interpolation.cubic);
       File(nPath).writeAsBytesSync(img.encodePng(up));
       File(rPath)
           .writeAsBytesSync(img.encodePng(img.copyRotate(up, angle: -90)));

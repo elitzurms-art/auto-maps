@@ -1,15 +1,31 @@
 import 'dart:io';
 
-/// עטיפת-OCR ל-Tesseract (subprocess). משמש לקריאת **תוויות-קואורדינטה
-/// מודפסות** ממפות-סקר/קדסטרליות (רשת ITM) — מנתיב "רשת-קואורדינטות".
-///
-/// ⚠️ נכון לעכשיו **Windows בלבד** (קריאה ל-`tesseract.exe`). באנדרואיד
-/// יש להוסיף מנוע (ML Kit / flutter_tesseract_ocr) — [available] יחזיר
-/// false ואז הנתיב פשוט לא יוצע.
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+
+/// עטיפת-OCR **דו-מנועית** לקריאת תוויות-קואורדינטה מודפסות ממפות-סקר/
+/// קדסטרליות (נתיב "רשת-קואורדינטות"):
+/// - **Windows/desktop** — Tesseract כ-subprocess (מצורף ליד ה-exe, בלי
+///   התקנה; fallback ל-Program Files/PATH).
+/// - **Android/iOS** — ML Kit Text Recognition v2 (on-device, המודל הלטיני
+///   מצורף ל-APK — עובד בלי רשת ובלי הורדת-מודל).
+/// אותו API לשני המנועים — [GridCoordService] לא מבדיל ביניהם.
 class OcrService {
   static String? _cached;
   static bool _resolved = false;
   static String? _tessdataDir; // כשמשתמשים ב-Tesseract המצורף
+
+  static bool get _mobile => Platform.isAndroid || Platform.isIOS;
+
+  /// ML Kit — נוצר פעם אחת (טעינת-המודל יקרה). חייב לרוץ על ה-isolate
+  /// הראשי (platform channels) — וכך זה אצלנו: רק הכנת-התמונה ב-Isolate.
+  static TextRecognizer? _recognizer;
+  static TextRecognizer get _mlkit =>
+      _recognizer ??= TextRecognizer(script: TextRecognitionScript.latin);
+
+  /// סקאלת-ההגדלה לאיתור-האוטומטי של תוויות: Tesseract צריך ×3 לדיוק;
+  /// ל-ML Kit אין צורך — והוא גם הכרחי: ביטמאפ ×3 של מקור ~4500px היה
+  /// מפוצץ את זיכרון-המובייל.
+  static int get autoScale => _mobile ? 1 : 3;
 
   /// נתיב ל-tesseract.exe. סדר-עדיפות: **מצורף ליד ה-exe** (`tesseract/`,
   /// עצמאי — בלי התקנה) → מותקן (Program Files) → PATH. null אם לא נמצא.
@@ -58,14 +74,17 @@ class OcrService {
   static List<String> _tessdataArgs() =>
       _tessdataDir == null ? const [] : ['--tessdata-dir', _tessdataDir!];
 
-  static Future<bool> available() async => (await tesseractPath()) != null;
+  /// מנוע-OCR זמין? במובייל תמיד (ML Kit מצורף); בדסקטופ — אם יש Tesseract.
+  static Future<bool> available() async =>
+      _mobile || (await tesseractPath()) != null;
 
-  /// מריץ OCR עם פלט **TSV** (תיבות-מילים) — לכל מילה: טקסט + מרכז-פיקסל.
+  /// מריץ OCR עם תיבות-מילים — לכל מילה: טקסט + מרכז-פיקסל.
   /// משמש לאיתור-אוטומטי של תוויות-קואורדינטה. ריק בכשל.
   static Future<List<({String text, double cx, double cy})>> readWords(
     String imagePath, {
     int psm = 11,
   }) async {
+    if (_mobile) return _mlkitWords(imagePath);
     final t = await tesseractPath();
     if (t == null) return const [];
     final out = '${Directory.systemTemp.path}/_amtsv';
@@ -102,9 +121,19 @@ class OcrService {
     }
   }
 
-  /// מריץ OCR על קובץ-תמונה עם whitelist-ספרות (+פסיק). מחזיר את הפלט
-  /// הגולמי, או מחרוזת ריקה בכשל. [psm] — מצב-פילוח (7=שורה, 11=דליל).
+  /// מריץ OCR על קובץ-תמונה. בדסקטופ — Tesseract עם whitelist-ספרות
+  /// (+פסיק); במובייל — ML Kit (בלי whitelist; הסינון הרגקספי אצל הקוראים).
+  /// מחזיר את הפלט הגולמי, או מחרוזת ריקה בכשל. [psm] — מצב-פילוח של
+  /// Tesseract (7=שורה, 11=דליל); לא רלוונטי ל-ML Kit.
   static Future<String> readDigits(String imagePath, {int psm = 11}) async {
+    if (_mobile) {
+      try {
+        final r = await _mlkit.processImage(InputImage.fromFilePath(imagePath));
+        return r.text;
+      } catch (_) {
+        return '';
+      }
+    }
     final t = await tesseractPath();
     if (t == null) return '';
     try {
@@ -120,6 +149,32 @@ class OcrService {
       return r.exitCode == 0 ? (r.stdout as String) : '';
     } catch (_) {
       return '';
+    }
+  }
+
+  /// מילים + מרכזי-תיבות מ-ML Kit: בלוקים → שורות → אלמנטים (מילים) —
+  /// מקביל אחד-לאחד לשורות ה-TSV של Tesseract.
+  static Future<List<({String text, double cx, double cy})>> _mlkitWords(
+      String imagePath) async {
+    try {
+      final r = await _mlkit.processImage(InputImage.fromFilePath(imagePath));
+      final out = <({String text, double cx, double cy})>[];
+      for (final block in r.blocks) {
+        for (final line in block.lines) {
+          for (final el in line.elements) {
+            final t = el.text.trim();
+            if (t.isEmpty) continue;
+            out.add((
+              text: t,
+              cx: el.boundingBox.center.dx,
+              cy: el.boundingBox.center.dy,
+            ));
+          }
+        }
+      }
+      return out;
+    } catch (_) {
+      return const [];
     }
   }
 }
