@@ -99,15 +99,6 @@ class GridCoordService {
     String imagePath, {
     void Function(String status, double fraction)? onProgress,
   }) async {
-    onProgress?.call('קורא תוויות (OCR)…', 0.05);
-    final labels = await OcrService.readGridLabels(
-      imagePath,
-      onTile: (done, total) => onProgress?.call(
-        'קורא תוויות (OCR)… $done/$total',
-        0.05 + 0.85 * done / total,
-      ),
-    );
-
     int? roundVal(String t) {
       final d = t.replaceAll(',', '').trim();
       if (!RegExp(r'^\d{6,7}$').hasMatch(d)) return null;
@@ -117,6 +108,46 @@ class GridCoordService {
 
     bool isNorthing(int v) =>
         (v >= 400000 && v <= 1300000) || (v >= 3000000 && v <= 4000000);
+
+    // עצירה-מוקדמת (נבדק בסוף כל טבעת-אריחים): ≥2 צפונים שונים + ≥2
+    // מזרחים שונים — המינימום ל-affine מלא. ערכים **שונים** — כפילויות של
+    // אותה תווית לא נחשבות (מונע עצירה על זוג-מנוון).
+    bool enough(List<OcrWord> normal, List<OcrWord> vertical) {
+      final ns = <int>{};
+      for (final w in normal) {
+        final v = roundVal(w.text);
+        if (v != null && isNorthing(v)) ns.add(v);
+      }
+      if (ns.length < 2) return false;
+      final utm = ns.any((v) => v >= 3000000);
+      bool isE(int v) =>
+          utm ? (v >= 600000 && v <= 834000) : (v >= 100000 && v <= 300000);
+      final es = <int>{};
+      for (final w in [...normal, ...vertical]) {
+        final v = roundVal(w.text);
+        if (v != null && isE(v)) es.add(v);
+      }
+      return es.length >= 2;
+    }
+
+    // מסווג-תווית לשלב-הגישוש: מספר עגול בטווח קואורדינטות כלשהו (צפון
+    // או מזרח, ITM/UTM/ישן) — קובע נוכחות-רשת ומודד גובה-תווית לכיול.
+    bool anyCoordLabel(String t) {
+      final v = roundVal(t);
+      return v != null &&
+          ((v >= 100000 && v <= 1300000) || (v >= 3000000 && v <= 4000000));
+    }
+
+    onProgress?.call('קורא תוויות (OCR)…', 0.05);
+    final labels = await OcrService.readGridLabels(
+      imagePath,
+      onTile: (done, total) => onProgress?.call(
+        'קורא תוויות (OCR)… $done/$total',
+        0.05 + 0.85 * (done / total).clamp(0.0, 1.0),
+      ),
+      isEnough: enough,
+      looksLikeLabel: anyCoordLabel,
+    );
 
     // צפונים — כיתוב אופקי. (הקואורדינטות כבר בפיקסלי-המקור.)
     final norths = <({double v, Offset px})>[];
@@ -175,6 +206,12 @@ class GridCoordService {
         crs: crs,
       ));
     }
+    debugPrint('[GRID] ticks: ${[
+      for (final t in ticks)
+        'E=${t.e.round()} N=${t.n.round()} @(${t.pixel.dx.round()},${t.pixel.dy.round()})'
+    ].join(' | ')} '
+        '(norths: ${norths.map((n) => n.v.round()).toList()}, '
+        'easts: ${easts.map((e) => e.v.round()).toList()})');
     return ticks;
   }
 }

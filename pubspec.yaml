@@ -76,7 +76,10 @@ dependencies:
   sqlite3: ^2.9.4
   # OCR במובייל — אותו מנוע-Tesseract כמו בדסקטופ (assets/tessdata זהה
   # לבנדל-Windows). ML Kit נוסה ונפסל: איטי ומדויק-פחות על תוויות-מפה.
-  flutter_tesseract_ocr: ^0.4.31
+  # ⚠️ vendored (plugins/): באנדרואיד הוחלף המופע-היחיד+AsyncTask-הטורי
+  # בבריכת-TessBaseAPI + thread-pool — קריאות-OCR מקביליות לאריחי-הרשת.
+  flutter_tesseract_ocr:
+    path: plugins/flutter_tesseract_ocr
 
 dev_dependencies:
   flutter_test:

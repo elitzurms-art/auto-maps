@@ -94,6 +94,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
   String? _gridStage; // שלב-נוכחי של מנוע-הרשת (לאבחון תקיעות)
   String? _roadStage; // שלב-נוכחי של מנוע-הכבישים
   bool _autoGridDone = false; // הרשת סיימה (עם/בלי תוצאה)
+  bool _roadKicked = false; // מנוע-הכבישים הוזנק (פעם אחת, בסיום-הרשת)
+  late final Future<void> _hintFuture; // פתרון רמז-השם משם-הקובץ
   bool _autoRoadDone = false; // הכבישים סיימו
   bool _autoOffered = false; // הבוחר כבר הוצג (מונע כפילות)
   // תוצאות שני המנועים — נשמרות **לצמיתות** כדי שאפשר יהיה לעבור ביניהן
@@ -179,11 +181,14 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
         _autoDetectGrid(silent: true);
       } else if (!ok) {
         _autoGridDone = true;
+        _startRoadEngineAfterGrid();
         _maybeOfferAuto();
       }
     });
-    // רמז-מיקום משם-הקובץ → ואז מנוע-הכבישים ברקע (או סימון "סיים" אם אין רמז).
-    _resolveFilenameHint().then((_) => _kickRoadEngine());
+    // רמז-מיקום משם-הקובץ נפתר מיד; מנוע-הכבישים עצמו מוזנק רק **בסיום
+    // מנוע-הרשת** (_startRoadEngineAfterGrid) — ריצה במקביל הרעיבה את
+    // תהליכי-ה-OCR (הכבישים מציפים את כל הליבות ב-isolates).
+    _hintFuture = _resolveFilenameHint();
     // מעקב אחר הזזת-המפה — מעדכן את קריאת-הקואורדינטה ואת רשת-הקואורדינטות.
     _mapEventSub = _mapController.mapEventStream.listen((_) {
       if (!mounted) return;
@@ -1877,6 +1882,8 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       _progressText = null;
       _gridStage = null;
     });
+    // הרשת סיימה (כולל ביטול/כשל) → הכבישים מקבלים מכונה פנויה.
+    _startRoadEngineAfterGrid();
     if (_autoCancelled) return;
     // הרצה **מפורשת** (⊞) → מציבים ומציגים מיד.
     if (!silent) {
@@ -2002,6 +2009,18 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
       _autoRoadResult = null;
     });
     _autoClassicalMatch(); // finally → setState + _maybeOfferAuto (מרענן ה-hub)
+  }
+
+  /// מזניק את מנוע-הכבישים **אחרי** סיום מנוע-הרשת (פעם אחת). הרצה
+  /// במקביל הרעיבה את תהליכי-ה-OCR — הכבישים מציפים את כל הליבות
+  /// ב-isolates (נמדד: 88ש' ל-9 אריחים מול ~10ש' במכונה פנויה); ברצף
+  /// הרשת מהירה והכבישים מקבלים מכונה פנויה — אותו זמן-כולל ל-hub.
+  void _startRoadEngineAfterGrid() {
+    if (_roadKicked) return;
+    _roadKicked = true;
+    _hintFuture.then((_) {
+      if (mounted) _kickRoadEngine();
+    });
   }
 
   /// מפעיל את מנוע-הכבישים ברקע אם יש רמז-שם; אחרת מסמן אותו כ"סיים" (בלי
