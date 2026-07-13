@@ -1404,10 +1404,10 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
               ),
             ),
           ),
-        // אינדיקטור-רקע לא-חוסם — **בר-אינסופי** שרץ עד ששני המנועים
-        // (רשת + כבישים) מסתיימים; אז מוצג הבוחר. המשתמש עובד ידנית במקביל,
-        // ו-× מבטל את ההצעה (נשארים ידני).
-        if (_autoRunning || _autoClassicalRunning)
+        // אינדיקטור-רקע לא-חוסם — **בר-אינסופי** שרץ עד ששלושת המנועים
+        // (רשת + כבישים + שמות) מסתיימים; אז מוצג הבוחר. המשתמש עובד ידנית
+        // במקביל, ו-× מבטל את ההצעה (נשארים ידני).
+        if (_autoRunning || _autoClassicalRunning || _autoNamesRunning)
           Positioned(
             top: 8,
             left: 0,
@@ -1438,6 +1438,7 @@ class _GeoreferenceScreenState extends State<GeoreferenceScreen> {
                                 _autoCancelled = true;
                                 _autoRunning = false;
                                 _autoClassicalRunning = false;
+                                _autoNamesRunning = false;
                                 _autoOffered = true; // מבטל את הבוחר — ידני
                               }),
                               child: const Padding(
